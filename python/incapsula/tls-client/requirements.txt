@@ -1,0 +1,2 @@
+git+https://github.com/Nintendocustom/Python-Tls-Client.git
+hyper-sdk
