@@ -1,0 +1,3 @@
+rnet>=3.0.0rc17
+asyncio
+hyper-sdk

@@ -32,12 +32,16 @@ Complete, working examples for bypassing modern bot protection systems using the
 │
 └── python/
     ├── akamai/
-    │   └── tls-client/        # Using Python-Tls-Client
+    │   ├── rnet/              # Using rnet (async, Rust-powered)
+    │   └── tls-client/        # Using Python-Tls-Client (sync)
     ├── datadome/
+    │   ├── rnet/
     │   └── tls-client/
     ├── incapsula/
+    │   ├── rnet/
     │   └── tls-client/
     └── kasada/
+        ├── rnet/
         └── tls-client/
 ```
 
@@ -63,10 +67,18 @@ go mod tidy
 go run main.go
 ```
 
-#### Python Examples
+#### Python Examples (tls-client - Synchronous)
 
 ```bash
 cd python/kasada/tls-client
+pip install -r requirements.txt
+python main.py
+```
+
+#### Python Examples (rnet - Asynchronous)
+
+```bash
+cd python/kasada/rnet
 pip install -r requirements.txt
 python main.py
 ```
@@ -85,6 +97,7 @@ python main.py
 
 | Library | Description |
 |---------|-------------|
+| [rnet](https://github.com/0x676e67/rnet) | High-performance async TLS client with browser emulation (Rust-powered) |
 | [Python-Tls-Client](https://github.com/Nintendocustom/Python-Tls-Client) | TLS client with browser impersonation |
 | [hyper-sdk](https://pypi.org/project/hyper-sdk/) | Hyper Solutions Python SDK |
 
@@ -165,6 +178,8 @@ TLS fingerprints are configured to match Chrome 133 profile for consistency with
 - [Hyper Solutions Docs](https://docs.hypersolutions.co)
 - [Go SDK Reference](https://pkg.go.dev/github.com/Hyper-Solutions/hyper-sdk-go/v2)
 - [Python SDK on PyPI](https://pypi.org/project/hyper-sdk/)
+- [rnet Documentation](https://github.com/0x676e67/rnet)
+- [rnet DeepWiki](https://deepwiki.com/0x676e67/rnet)
 
 ## 💬 Support
 
