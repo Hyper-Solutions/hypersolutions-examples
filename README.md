@@ -1,25 +1,25 @@
 # Hyper Solutions SDK Examples
 
-[![Discord](https://dcbadge.limes.pink/api/server/akamai)](https://discord.gg/akamai)
-
 Complete, working examples for bypassing modern bot protection systems using the [Hyper Solutions](https://hypersolutions.co) SDK.
 
-## 🛡️ Supported Protections
+[![Discord](https://dcbadge.limes.pink/api/server/akamai)](https://discord.gg/akamai)
+
+## Supported Protections
 
 | Protection | Description |
 |------------|-------------|
-| **Akamai Bot Manager** | Sensor data generation, SBSD challenges, cookie validation |
-| **DataDome** | Interstitial challenges, slider captcha, tags/signal collection |
-| **Incapsula (Imperva)** | Reese84 sensor generation, POW challenges |
-| **Kasada** | Payload generation (CT), POW tokens (CD), BotID verification |
+| Akamai Bot Manager | Sensor data generation, SBSD challenges, cookie validation |
+| DataDome | Interstitial challenges, slider captcha, tags/signal collection |
+| Incapsula (Imperva) | Reese84 sensor generation, POW challenges |
+| Kasada | Payload generation (CT), POW tokens (CD), BotID verification |
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 ├── golang/
 │   ├── akamai/
-│   │   ├── azuretls/          # Using Noooste/azuretls-client
-│   │   └── bogdanfinn/        # Using bogdanfinn/tls-client
+│   │   ├── azuretls/
+│   │   └── bogdanfinn/
 │   ├── datadome/
 │   │   ├── azuretls/
 │   │   └── bogdanfinn/
@@ -30,10 +30,20 @@ Complete, working examples for bypassing modern bot protection systems using the
 │       ├── azuretls/
 │       └── bogdanfinn/
 │
+├── node/
+│   ├── akamai/
+│   │   └── tlsclientwrapper/
+│   ├── datadome/
+│   │   └── tlsclientwrapper/
+│   ├── incapsula/
+│   │   └── tlsclientwrapper/
+│   └── kasada/
+│       └── tlsclientwrapper/
+│
 └── python/
     ├── akamai/
-    │   ├── rnet/              # Using rnet (async, Rust-powered)
-    │   └── tls-client/        # Using Python-Tls-Client (sync)
+    │   ├── rnet/
+    │   └── tls-client/
     ├── datadome/
     │   ├── rnet/
     │   └── tls-client/
@@ -45,7 +55,7 @@ Complete, working examples for bypassing modern bot protection systems using the
         └── tls-client/
 ```
 
-## 🔑 Getting Started
+## Getting Started
 
 ### 1. Get Your API Key
 
@@ -59,7 +69,7 @@ export HYPER_API_KEY="your-api-key-here"
 
 ### 3. Run an Example
 
-#### Go Examples
+**Go (bogdanfinn/tls-client)**
 
 ```bash
 cd golang/kasada/bogdanfinn
@@ -67,7 +77,15 @@ go mod tidy
 go run main.go
 ```
 
-#### Python Examples (tls-client - Synchronous)
+**Node.js (tlsclientwrapper)**
+
+```bash
+cd node/kasada/tlsclientwrapper
+npm install
+node index.js
+```
+
+**Python (tls-client, synchronous)**
 
 ```bash
 cd python/kasada/tls-client
@@ -75,7 +93,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-#### Python Examples (rnet - Asynchronous)
+**Python (rnet, asynchronous)**
 
 ```bash
 cd python/kasada/rnet
@@ -83,7 +101,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-## 📦 Dependencies
+## Dependencies
 
 ### Go
 
@@ -93,34 +111,41 @@ python main.py
 | [Noooste/azuretls-client](https://github.com/Noooste/azuretls-client) | Alternative TLS client with Chrome fingerprinting |
 | [Hyper-Solutions/hyper-sdk-go](https://github.com/Hyper-Solutions/hyper-sdk-go) | Hyper Solutions Go SDK |
 
+### Node.js
+
+| Library | Description |
+|---------|-------------|
+| [tlsclientwrapper](https://github.com/DemonMartin/tlsClient) | TLS client wrapper using Koffi bindings and worker pools |
+| [hyper-sdk-js](https://www.npmjs.com/package/hyper-sdk-js) | Hyper Solutions JavaScript/TypeScript SDK |
+
 ### Python
 
 | Library | Description |
 |---------|-------------|
-| [rnet](https://github.com/0x676e67/rnet) | High-performance async TLS client with browser emulation (Rust-powered) |
+| [rnet](https://github.com/0x676e67/rnet) | Async TLS client with browser emulation (Rust-powered) |
 | [Python-Tls-Client](https://github.com/Nintendocustom/Python-Tls-Client) | TLS client with browser impersonation |
 | [hyper-sdk](https://pypi.org/project/hyper-sdk/) | Hyper Solutions Python SDK |
 
-## 🔧 Configuration
+## Configuration
 
-Each example includes a `Config` struct/dataclass with the following common options:
+Each example includes a configuration object with the following common options:
 
 | Option | Description |
 |--------|-------------|
-| `api_key` | Your Hyper Solutions API key |
-| `target_url` / `page_url` | The protected page URL |
-| `proxy_url` | Optional HTTP/HTTPS/SOCKS5 proxy |
-| `accept_language` | Browser accept-language header |
+| `api_key` / `apiKey` | Your Hyper Solutions API key |
+| `target_url` / `targetUrl` / `page_url` / `pageUrl` | The protected page URL |
+| `proxy_url` / `proxyUrl` | Optional HTTP/HTTPS/SOCKS5 proxy |
+| `accept_language` / `acceptLanguage` | Browser accept-language header |
 | `timeout` | Request timeout duration |
 
 Protection-specific options are documented in each example file.
 
-## 📚 Example Flows
+## Example Flows
 
 ### Akamai Bot Manager
 
 1. Fetch target page and detect protection (SBSD or sensor)
-2. If SBSD detected: fetch script → generate payload → POST
+2. If SBSD detected: fetch script, generate payload, POST
 3. Parse sensor endpoint from page
 4. Fetch sensor script
 5. Generate and POST sensor data (up to 3 times)
@@ -130,8 +155,8 @@ Protection-specific options are documented in each example file.
 
 1. Fetch target page to trigger DataDome
 2. Detect challenge type (interstitial vs slider)
-3. If interstitial: fetch page → generate payload → POST
-4. If slider: fetch captcha → download images → solve → submit
+3. If interstitial: fetch page, generate payload, POST
+4. If slider: fetch captcha, download images, solve, submit
 5. Optional: send tags requests for signal collection
 6. Verify access
 
@@ -155,7 +180,7 @@ Protection-specific options are documented in each example file.
 6. Optional: solve BotID challenge
 7. Generate POW (x-kpsdk-cd) for protected requests
 
-## 🌐 Browser Fingerprinting
+## Browser Fingerprinting
 
 All examples use Chrome 143 fingerprints:
 
@@ -167,26 +192,28 @@ sec-ch-ua-platform: "Windows"
 
 TLS fingerprints are configured to match Chrome 133 profile for consistency with the TLS client libraries.
 
-## ⚠️ Important Notes
+## Important Notes
 
-- **Header Order Matters**: All examples carefully maintain HTTP header order to match real browser behavior
-- **Cookie Handling**: Examples use proper cookie jar management for session persistence
-- **IP Consistency**: Your public IP is sent to the API for fingerprint consistency - use the same proxy for all requests
+- **Header order matters.** All examples carefully maintain HTTP header order to match real browser behavior.
+- **Cookie handling.** Examples use proper cookie jar management for session persistence.
+- **IP consistency.** Your public IP is sent to the API for fingerprint consistency. Use the same proxy for all requests.
+- **Node.js requirements.** The tlsclientwrapper requires Node.js 16+ and a platform supported by Koffi (Windows, macOS, Linux).
 
-## 📖 Documentation
+## Documentation
 
 - [Hyper Solutions Docs](https://docs.hypersolutions.co)
 - [Go SDK Reference](https://pkg.go.dev/github.com/Hyper-Solutions/hyper-sdk-go/v2)
-- [Python SDK on PyPI](https://pypi.org/project/hyper-sdk/)
-- [rnet Documentation](https://github.com/0x676e67/rnet)
-- [rnet DeepWiki](https://deepwiki.com/0x676e67/rnet)
+- [JavaScript SDK (npm)](https://www.npmjs.com/package/hyper-sdk-js)
+- [Python SDK (PyPI)](https://pypi.org/project/hyper-sdk/)
+- [tlsclientwrapper](https://github.com/DemonMartin/tlsClient)
+- [rnet](https://github.com/0x676e67/rnet)
 
-## 💬 Support
+## Support
 
-- Join our [Discord community](https://discord.gg/akamai) for help and discussions
-- Report issues on GitHub
-- Contact support at [hypersolutions.co](https://hypersolutions.co)
+- [Discord community](https://discord.gg/akamai)
+- [GitHub Issues](https://github.com/Hyper-Solutions/hyper-sdk-examples/issues)
+- [hypersolutions.co](https://hypersolutions.co)
 
-## 📄 License
+## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.

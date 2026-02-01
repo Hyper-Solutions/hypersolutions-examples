@@ -540,8 +540,8 @@ async def main():
     config = default_config()
 
     # Configure for your target site
-    config.target_url = "https://www.example.com/us/en"
-    config.referer = "https://www.example.com/us/en"
+    config.target_url = "https://www.delta.com/us/en"
+    config.referer = "https://www.delta.com/us/en"
     config.version = "3"  # Akamai version
 
     # Validate API key
