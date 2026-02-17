@@ -14,7 +14,7 @@ Join our Discord community: https://discord.gg/akamai
 """
 
 import asyncio
-import json
+import base64
 import os
 import re
 from dataclasses import dataclass
@@ -598,7 +598,7 @@ class DataDomeSolver:
             default_headers=False,
         )
         content = await resp.bytes()
-        return content.decode("latin-1")
+        return base64.b64encode(content).decode("ascii")
 
     async def _download_piece_image(self) -> str:
         """Downloads the slider piece image and returns as string."""
@@ -634,7 +634,7 @@ class DataDomeSolver:
             default_headers=False,
         )
         content = await resp.bytes()
-        return content.decode("latin-1")
+        return base64.b64encode(content).decode("ascii")
 
     async def _submit_slider_solution(self, check_url: str) -> None:
         """Submits the generated slider solution."""
