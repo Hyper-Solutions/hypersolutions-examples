@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.10.1-0.20260914202302-239ef087ee68
-	github.com/Noooste/azuretls-client v1.12.12
+	github.com/Noooste/azuretls-client v1.13.2
 	github.com/Noooste/fhttp v1.0.15
 )
 

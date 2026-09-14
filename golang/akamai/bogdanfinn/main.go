@@ -87,13 +87,13 @@ func DefaultConfig() *Config {
 // =============================================================================
 
 // These constants define the browser fingerprint used for requests.
-// They must match the TLS client profile (Chrome 133) to avoid detection.
+// They must match the TLS client profile (Chrome 152) to avoid detection.
 const (
-	// UserAgent is the browser user agent string for Chrome 143 on Windows.
-	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	// UserAgent is the browser user agent string for Chrome 152 on Windows.
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 
-	// SecChUa is the sec-ch-ua header value for Chrome 143.
-	SecChUa = `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
+	// SecChUa is the sec-ch-ua header value for Chrome 152.
+	SecChUa = `"Not=A?Brand";v="99", "Google Chrome";v="152", "Chromium";v="152"`
 
 	// SecChUaPlatform is the sec-ch-ua-platform header value.
 	SecChUaPlatform = `"Windows"`
@@ -180,7 +180,7 @@ func createHTTPClient(config *Config) (tlsclient.HttpClient, error) {
 	}
 
 	options := []tlsclient.HttpClientOption{
-		tlsclient.WithClientProfile(profiles.Chrome_133),
+		tlsclient.WithClientProfile(profiles.Chrome_152),
 		tlsclient.WithNotFollowRedirects(),
 		tlsclient.WithTimeoutSeconds(int(config.Timeout.Seconds())),
 		tlsclient.WithRandomTLSExtensionOrder(),
