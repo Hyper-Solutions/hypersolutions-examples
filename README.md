@@ -155,10 +155,15 @@ Protection-specific options are documented in each example file.
 
 1. Fetch target page to trigger DataDome
 2. Detect challenge type (interstitial vs slider)
-3. If interstitial: fetch page, generate payload, POST
-4. If slider: fetch captcha, download images, solve, submit
-5. Optional: send tags requests for signal collection
-6. Verify access
+3. Fetch the challenge script if the page loads it from its own file instead of inlining it
+4. If interstitial: fetch page, generate payload, POST
+5. If slider: fetch captcha, download images, solve, submit
+6. Optional: send tags requests for signal collection
+7. Verify access
+
+DataDome picks between inlining the challenge script and serving it from its own file per
+request, so step 3 runs on every challenge. The SDK helper tells you which case you are in,
+and you pass the script body to the API when there is one.
 
 ### Incapsula (Reese84)
 

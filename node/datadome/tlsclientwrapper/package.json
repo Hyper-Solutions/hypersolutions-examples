@@ -10,7 +10,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "hyper-sdk-js": "^2.12.0",
+    "hyper-sdk-js": "^3.1.0",
     "tlsclientwrapper": "^4.1.2"
   }
 }

@@ -189,6 +189,7 @@ type DataDomeSolver struct {
 	ip              string
 	deviceCheckLink string
 	html            string
+	script          string
 	captchaPath     string
 	isInterstitial  bool
 }
@@ -459,12 +460,18 @@ func (s *DataDomeSolver) solveInterstitial(ctx context.Context) error {
 		return err
 	}
 
+	// Step 2b: Fetch the challenge script if the page loads it from its own file
+	if err := s.fetchChallengeScript(ctx); err != nil {
+		return err
+	}
+
 	// Step 2c: Generate interstitial payload using Hyper API
 	log.Println("  Generating interstitial payload via Hyper API...")
 	payload, _, err := s.hyperAPI.GenerateDataDomeInterstitial(ctx, &hyper.DataDomeInterstitialInput{
 		UserAgent:      UserAgent,
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
+		Script:         s.script,
 		IP:             s.ip,
 		AcceptLanguage: s.config.AcceptLanguage,
 	})
@@ -519,6 +526,67 @@ func (s *DataDomeSolver) fetchInterstitialPage(ctx context.Context) error {
 	}
 
 	s.html = string(body)
+	return nil
+}
+
+// fetchChallengeScript downloads the challenge bundle when the page loads it
+// from its own file rather than inlining it.
+//
+// DataDome switches between the two forms per request, so this is checked on
+// every challenge. When the page inlines the bundle there is nothing to fetch
+// and script stays empty.
+func (s *DataDomeSolver) fetchChallengeScript(ctx context.Context) error {
+	s.script = ""
+
+	scriptURL, ok := datadome.ParseChallengeScriptURL(s.html)
+	if !ok {
+		log.Println("  Challenge script is inlined in the page")
+		return nil
+	}
+
+	log.Printf("  Fetching challenge script: %s", scriptURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", scriptURL, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header = http.Header{
+		"Connection":         {"keep-alive"},
+		"sec-ch-ua":          {SecChUa},
+		"sec-ch-ua-mobile":   {"?0"},
+		"sec-ch-ua-platform": {SecChUaPlatform},
+		"User-Agent":         {UserAgent},
+		"Accept":             {"*/*"},
+		"Sec-Fetch-Site":     {"cross-site"},
+		"Sec-Fetch-Mode":     {"no-cors"},
+		"Sec-Fetch-Dest":     {"script"},
+		"Referer":            {s.deviceCheckLink},
+		"Accept-Encoding":    {"gzip, deflate, br, zstd"},
+		"Accept-Language":    {s.config.AcceptLanguage},
+		http.HeaderOrderKey: {
+			"Host", "Connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+			"User-Agent", "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
+			"Referer", "Accept-Encoding", "Accept-Language",
+		},
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch challenge script: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("challenge script returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	s.script = string(body)
 	return nil
 }
 
@@ -611,12 +679,18 @@ func (s *DataDomeSolver) solveSliderCaptcha(ctx context.Context) error {
 		return err
 	}
 
+	// Step 3c: Fetch the challenge script if the page loads it from its own file
+	if err := s.fetchChallengeScript(ctx); err != nil {
+		return err
+	}
+
 	// Step 3d: Generate slider solution using Hyper API
 	log.Println("  Generating slider solution via Hyper API...")
 	checkURL, _, err := s.hyperAPI.GenerateDataDomeSlider(ctx, &hyper.DataDomeSliderInput{
 		UserAgent:      UserAgent,
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
+		Script:         s.script,
 		Puzzle:         string(puzzle),
 		Piece:          string(piece),
 		IP:             s.ip,

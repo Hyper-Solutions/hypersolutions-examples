@@ -22,6 +22,7 @@ import {
     generateInterstitialPayload,
     generateSliderPayload,
     generateTagsPayload,
+    parseChallengeScriptUrl,
     parseInterstitialDeviceCheckUrl,
     parseSliderDeviceCheckUrl,
 } from 'hyper-sdk-js';
@@ -144,6 +145,7 @@ class DataDomeSolver {
         this.ip = '';
         this.deviceCheckLink = '';
         this.html = '';
+        this.script = undefined;
         this.captchaPath = '';
         this.isInterstitial = false;
     }
@@ -407,7 +409,10 @@ class DataDomeSolver {
         console.log('  Fetching interstitial page...');
         await this._fetchInterstitialPage();
 
-        // Step 2b: Generate interstitial payload using Hyper API
+        // Step 2b: Fetch the challenge script if the page loads it from its own file
+        await this._fetchChallengeScript();
+
+        // Step 2c: Generate interstitial payload using Hyper API
         console.log('  Generating interstitial payload via Hyper API...');
         const result = await generateInterstitialPayload(
             this.hyperApi,
@@ -416,12 +421,13 @@ class DataDomeSolver {
                 this.deviceCheckLink,
                 this.html,
                 this.ip,
-                this.config.acceptLanguage
+                this.config.acceptLanguage,
+                this.script
             )
         );
         const payload = result.payload;
 
-        // Step 2c: Submit the interstitial payload
+        // Step 2d: Submit the interstitial payload
         console.log('  Submitting interstitial solution...');
         await this._submitInterstitial(payload);
     }
@@ -472,6 +478,69 @@ class DataDomeSolver {
         });
 
         this.html = response.body;
+    }
+
+    /**
+     * Downloads the challenge bundle when the page loads it from its own file
+     * rather than inlining it.
+     *
+     * DataDome switches between the two forms per request, so this is checked
+     * on every challenge. When the page inlines the bundle there is nothing to
+     * fetch and script stays undefined.
+     * @returns {Promise<void>}
+     */
+    async _fetchChallengeScript() {
+        this.script = undefined;
+
+        const scriptUrl = parseChallengeScriptUrl(this.html);
+        if (scriptUrl === null) {
+            console.log('  Challenge script is inlined in the page');
+            return;
+        }
+
+        console.log(`  Fetching challenge script: ${scriptUrl}`);
+
+        const headers = {
+            connection: 'keep-alive',
+            'sec-ch-ua': SEC_CH_UA,
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': SEC_CH_UA_PLATFORM,
+            'user-agent': USER_AGENT,
+            accept: '*/*',
+            'sec-fetch-site': 'cross-site',
+            'sec-fetch-mode': 'no-cors',
+            'sec-fetch-dest': 'script',
+            referer: this.deviceCheckLink,
+            'accept-encoding': 'gzip, deflate, br, zstd',
+            'accept-language': this.config.acceptLanguage,
+        };
+
+        const headerOrder = [
+            'host',
+            'connection',
+            'sec-ch-ua',
+            'sec-ch-ua-mobile',
+            'sec-ch-ua-platform',
+            'user-agent',
+            'accept',
+            'sec-fetch-site',
+            'sec-fetch-mode',
+            'sec-fetch-dest',
+            'referer',
+            'accept-encoding',
+            'accept-language',
+        ];
+
+        const response = await this.session.get(scriptUrl, {
+            headers,
+            headerOrder,
+        });
+
+        if (response.status !== 200) {
+            throw new Error(`Challenge script returned status ${response.status}`);
+        }
+
+        this.script = response.body;
     }
 
     /**
@@ -556,7 +625,10 @@ class DataDomeSolver {
         const puzzle = await this._downloadPuzzleImage();
         const piece = await this._downloadPieceImage();
 
-        // Step 3c: Generate slider solution using Hyper API
+        // Step 3c: Fetch the challenge script if the page loads it from its own file
+        await this._fetchChallengeScript();
+
+        // Step 3d: Generate slider solution using Hyper API
         console.log('  Generating slider solution via Hyper API...');
         const result = await generateSliderPayload(
             this.hyperApi,
@@ -566,14 +638,15 @@ class DataDomeSolver {
                 this.html,
                 puzzle,
                 piece,
+                '', // parentUrl
                 this.ip,
                 this.config.acceptLanguage,
-                '' // parentUrl
+                this.script
             )
         );
         const checkUrl = result.payload;
 
-        // Step 3d: Submit the slider solution
+        // Step 3e: Submit the slider solution
         console.log('  Submitting slider solution...');
         await this._submitSliderSolution(checkUrl);
     }

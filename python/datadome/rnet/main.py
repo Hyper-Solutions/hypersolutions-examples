@@ -26,7 +26,11 @@ from rnet.emulation import Emulation
 
 from hyper_sdk import SessionAsync as HyperSession
 from hyper_sdk import DataDomeInterstitialInput, DataDomeSliderInput, DataDomeTagsInput
-from hyper_sdk.datadome import parse_interstitial_device_check_link, parse_slider_device_check_link
+from hyper_sdk.datadome import (
+    parse_challenge_script_url,
+    parse_interstitial_device_check_link,
+    parse_slider_device_check_link,
+)
 
 
 # =============================================================================
@@ -152,6 +156,7 @@ class DataDomeSolver:
         self.ip: str = ""
         self.device_check_link: str = ""
         self.html: str = ""
+        self.script: str = ""
         self.captcha_path: str = ""
         self.is_interstitial: bool = False
 
@@ -395,20 +400,24 @@ class DataDomeSolver:
         print("  Fetching interstitial page...")
         await self._fetch_interstitial_page()
 
-        # Step 2b: Generate interstitial payload using Hyper API
+        # Step 2b: Fetch the challenge script if the page loads it from its own file
+        await self._fetch_challenge_script()
+
+        # Step 2c: Generate interstitial payload using Hyper API
         print("  Generating interstitial payload via Hyper API...")
         result = await self.hyper_api.generate_interstitial_payload(
             DataDomeInterstitialInput(
                 user_agent=USER_AGENT,
                 device_link=self.device_check_link,
                 html=self.html,
+                script=self.script,
                 ip=self.ip,
                 accept_language=self.config.accept_language,
             )
         )
         payload = result["payload"]
 
-        # Step 2c: Submit the interstitial payload
+        # Step 2d: Submit the interstitial payload
         print("  Submitting interstitial solution...")
         await self._submit_interstitial(payload)
 
@@ -445,6 +454,55 @@ class DataDomeSolver:
             default_headers=False,
         )
         self.html = await resp.text()
+
+    async def _fetch_challenge_script(self) -> None:
+        """Downloads the challenge bundle when the page loads it from its own file
+        rather than inlining it.
+
+        DataDome switches between the two forms per request, so this is checked on
+        every challenge. When the page inlines the bundle there is nothing to fetch
+        and script stays empty.
+        """
+        self.script = ""
+
+        script_url = parse_challenge_script_url(self.html)
+        if script_url is None:
+            print("  Challenge script is inlined in the page")
+            return
+
+        print(f"  Fetching challenge script: {script_url}")
+
+        headers = self._build_headers({
+            "Connection": "keep-alive",
+            "sec-ch-ua": SEC_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Dest": "script",
+            "Referer": self.device_check_link,
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": self.config.accept_language,
+        })
+
+        header_order = self._build_header_order([
+            "Host", "Connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+            "User-Agent", "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
+            "Referer", "Accept-Encoding", "Accept-Language",
+        ])
+
+        resp = await self.client.get(
+            script_url,
+            headers=headers,
+            orig_headers=header_order,
+            default_headers=False,
+        )
+        if resp.status.as_int() != 200:
+            raise RuntimeError(f"Challenge script returned status {resp.status.as_int()}")
+
+        self.script = await resp.text()
 
     async def _submit_interstitial(self, payload: str) -> None:
         """Posts the generated payload to solve the interstitial."""
@@ -505,13 +563,17 @@ class DataDomeSolver:
         puzzle = await self._download_puzzle_image()
         piece = await self._download_piece_image()
 
-        # Step 3c: Generate slider solution using Hyper API
+        # Step 3c: Fetch the challenge script if the page loads it from its own file
+        await self._fetch_challenge_script()
+
+        # Step 3d: Generate slider solution using Hyper API
         print("  Generating slider solution via Hyper API...")
         result = await self.hyper_api.generate_slider_payload(
             DataDomeSliderInput(
                 user_agent=USER_AGENT,
                 device_link=self.device_check_link,
                 html=self.html,
+                script=self.script,
                 puzzle=puzzle,
                 piece=piece,
                 ip=self.ip,
@@ -521,7 +583,7 @@ class DataDomeSolver:
         )
         check_url = result["payload"]
 
-        # Step 3d: Submit the slider solution
+        # Step 3e: Submit the slider solution
         print("  Submitting slider solution...")
         await self._submit_slider_solution(check_url)
 

@@ -25,7 +25,11 @@ import tls_client
 
 from hyper_sdk import Session as HyperSession
 from hyper_sdk import DataDomeInterstitialInput, DataDomeSliderInput, DataDomeTagsInput
-from hyper_sdk.datadome import parse_interstitial_device_check_link, parse_slider_device_check_link
+from hyper_sdk.datadome import (
+    parse_challenge_script_url,
+    parse_interstitial_device_check_link,
+    parse_slider_device_check_link,
+)
 from tls_client.cookies import cookiejar_from_dict
 
 
@@ -148,6 +152,7 @@ class DataDomeSolver:
         self.ip: str = ""
         self.device_check_link: str = ""
         self.html: str = ""
+        self.script: str = ""
         self.captcha_path: str = ""
         self.is_interstitial: bool = False
 
@@ -351,20 +356,24 @@ class DataDomeSolver:
         print("  Fetching interstitial page...")
         self._fetch_interstitial_page()
 
-        # Step 2b: Generate interstitial payload using Hyper API
+        # Step 2b: Fetch the challenge script if the page loads it from its own file
+        self._fetch_challenge_script()
+
+        # Step 2c: Generate interstitial payload using Hyper API
         print("  Generating interstitial payload via Hyper API...")
         result = self.hyper_api.generate_interstitial_payload(
             DataDomeInterstitialInput(
                 user_agent=USER_AGENT,
                 device_link=self.device_check_link,
                 html=self.html,
+                script=self.script,
                 ip=self.ip,
                 accept_language=self.config.accept_language,
             )
         )
         payload = result["payload"]
 
-        # Step 2c: Submit the interstitial payload
+        # Step 2d: Submit the interstitial payload
         print("  Submitting interstitial solution...")
         self._submit_interstitial(payload)
 
@@ -397,6 +406,51 @@ class DataDomeSolver:
 
         resp = self.session.get(self.device_check_link)
         self.html = resp.text
+
+    def _fetch_challenge_script(self) -> None:
+        """Downloads the challenge bundle when the page loads it from its own file
+        rather than inlining it.
+
+        DataDome switches between the two forms per request, so this is checked on
+        every challenge. When the page inlines the bundle there is nothing to fetch
+        and script stays empty.
+        """
+        self.script = ""
+
+        script_url = parse_challenge_script_url(self.html)
+        if script_url is None:
+            print("  Challenge script is inlined in the page")
+            return
+
+        print(f"  Fetching challenge script: {script_url}")
+
+        headers = {
+            "connection": "keep-alive",
+            "sec-ch-ua": SEC_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
+            "user-agent": USER_AGENT,
+            "accept": "*/*",
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "no-cors",
+            "sec-fetch-dest": "script",
+            "referer": self.device_check_link,
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": self.config.accept_language,
+        }
+
+        self.session.headers = headers
+        self.session.header_order = [
+            "host", "connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+            "user-agent", "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+            "referer", "accept-encoding", "accept-language",
+        ]
+
+        resp = self.session.get(script_url)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Challenge script returned status {resp.status_code}")
+
+        self.script = resp.text
 
     def _submit_interstitial(self, payload: str) -> None:
         """Posts the generated payload to solve the interstitial."""
@@ -455,13 +509,17 @@ class DataDomeSolver:
         puzzle = self._download_puzzle_image()
         piece = self._download_piece_image()
 
-        # Step 3c: Generate slider solution using Hyper API
+        # Step 3c: Fetch the challenge script if the page loads it from its own file
+        self._fetch_challenge_script()
+
+        # Step 3d: Generate slider solution using Hyper API
         print("  Generating slider solution via Hyper API...")
         result = self.hyper_api.generate_slider_payload(
             DataDomeSliderInput(
                 user_agent=USER_AGENT,
                 device_link=self.device_check_link,
                 html=self.html,
+                script=self.script,
                 puzzle=puzzle,
                 piece=piece,
                 ip=self.ip,
@@ -471,7 +529,7 @@ class DataDomeSolver:
         )
         check_url = result["payload"]
 
-        # Step 3d: Submit the slider solution
+        # Step 3e: Submit the slider solution
         print("  Submitting slider solution...")
         self._submit_slider_solution(check_url)
 

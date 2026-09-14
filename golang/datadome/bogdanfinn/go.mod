@@ -3,7 +3,7 @@ module datadome-example
 go 1.25.5
 
 require (
-	github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.9.1
+	github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.10.1-0.20260914202302-239ef087ee68
 	github.com/bogdanfinn/fhttp v0.6.6
 	github.com/bogdanfinn/tls-client v1.13.1
 )
