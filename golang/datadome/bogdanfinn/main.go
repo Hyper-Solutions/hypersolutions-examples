@@ -16,6 +16,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -691,8 +692,8 @@ func (s *DataDomeSolver) solveSliderCaptcha(ctx context.Context) error {
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
 		Script:         s.script,
-		Puzzle:         string(puzzle),
-		Piece:          string(piece),
+		Puzzle:         base64.StdEncoding.EncodeToString(puzzle),
+		Piece:          base64.StdEncoding.EncodeToString(piece),
 		IP:             s.ip,
 		AcceptLanguage: s.config.AcceptLanguage,
 	})
