@@ -117,13 +117,13 @@ func DefaultConfig() *Config {
 // =============================================================================
 
 // These constants define the browser fingerprint used for requests.
-// They must match the TLS client profile (Chrome 133) to avoid detection.
+// They must match the TLS client profile (Chrome 152) to avoid detection.
 const (
-	// UserAgent is the browser user agent string for Chrome 143 on Windows.
-	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	// UserAgent is the browser user agent string for Chrome 152 on Windows.
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 
-	// SecChUa is the sec-ch-ua header value for Chrome 143.
-	SecChUa = `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
+	// SecChUa is the sec-ch-ua header value for Chrome 152.
+	SecChUa = `"Not=A?Brand";v="99", "Google Chrome";v="152", "Chromium";v="152"`
 
 	// SecChUaPlatform is the sec-ch-ua-platform header value.
 	SecChUaPlatform = `"Windows"`
@@ -131,7 +131,7 @@ const (
 
 // createHTTPClient creates a new TLS client with proper browser fingerprinting.
 // The client is configured to:
-//   - Use Chrome 133 TLS fingerprint
+//   - Use Chrome 152 TLS fingerprint
 //   - Not follow redirects (to detect DataDome challenges)
 //   - Use a cookie jar for session management
 //   - Optionally use a proxy
@@ -144,8 +144,8 @@ func createHTTPClient(config *Config) (tlsclient.HttpClient, error) {
 
 	// Build client options
 	options := []tlsclient.HttpClientOption{
-		// Use Chrome 133 TLS fingerprint - this must match your user agent
-		tlsclient.WithClientProfile(profiles.Chrome_133),
+		// Use Chrome 152 TLS fingerprint - this must match your user agent
+		tlsclient.WithClientProfile(profiles.Chrome_152),
 
 		// Don't follow redirects - we need to detect DataDome challenge redirects
 		tlsclient.WithNotFollowRedirects(),
@@ -190,6 +190,7 @@ type DataDomeSolver struct {
 	ip              string
 	deviceCheckLink string
 	html            string
+	script          string
 	captchaPath     string
 	isInterstitial  bool
 }
@@ -460,12 +461,18 @@ func (s *DataDomeSolver) solveInterstitial(ctx context.Context) error {
 		return err
 	}
 
+	// Step 2b: Fetch the challenge script if the page loads it from its own file
+	if err := s.fetchChallengeScript(ctx); err != nil {
+		return err
+	}
+
 	// Step 2c: Generate interstitial payload using Hyper API
 	log.Println("  Generating interstitial payload via Hyper API...")
 	payload, _, err := s.hyperAPI.GenerateDataDomeInterstitial(ctx, &hyper.DataDomeInterstitialInput{
 		UserAgent:      UserAgent,
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
+		Script:         s.script,
 		IP:             s.ip,
 		AcceptLanguage: s.config.AcceptLanguage,
 	})
@@ -520,6 +527,67 @@ func (s *DataDomeSolver) fetchInterstitialPage(ctx context.Context) error {
 	}
 
 	s.html = string(body)
+	return nil
+}
+
+// fetchChallengeScript downloads the challenge bundle when the page loads it
+// from its own file rather than inlining it.
+//
+// DataDome switches between the two forms per request, so this is checked on
+// every challenge. When the page inlines the bundle there is nothing to fetch
+// and script stays empty.
+func (s *DataDomeSolver) fetchChallengeScript(ctx context.Context) error {
+	s.script = ""
+
+	scriptURL, ok := datadome.ParseChallengeScriptURL(s.html)
+	if !ok {
+		log.Println("  Challenge script is inlined in the page")
+		return nil
+	}
+
+	log.Printf("  Fetching challenge script: %s", scriptURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", scriptURL, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header = http.Header{
+		"Connection":         {"keep-alive"},
+		"sec-ch-ua":          {SecChUa},
+		"sec-ch-ua-mobile":   {"?0"},
+		"sec-ch-ua-platform": {SecChUaPlatform},
+		"User-Agent":         {UserAgent},
+		"Accept":             {"*/*"},
+		"Sec-Fetch-Site":     {"cross-site"},
+		"Sec-Fetch-Mode":     {"no-cors"},
+		"Sec-Fetch-Dest":     {"script"},
+		"Referer":            {s.deviceCheckLink},
+		"Accept-Encoding":    {"gzip, deflate, br, zstd"},
+		"Accept-Language":    {s.config.AcceptLanguage},
+		http.HeaderOrderKey: {
+			"Host", "Connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+			"User-Agent", "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
+			"Referer", "Accept-Encoding", "Accept-Language",
+		},
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to fetch challenge script: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("challenge script returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	s.script = string(body)
 	return nil
 }
 
@@ -612,12 +680,18 @@ func (s *DataDomeSolver) solveSliderCaptcha(ctx context.Context) error {
 		return err
 	}
 
+	// Step 3c: Fetch the challenge script if the page loads it from its own file
+	if err := s.fetchChallengeScript(ctx); err != nil {
+		return err
+	}
+
 	// Step 3d: Generate slider solution using Hyper API
 	log.Println("  Generating slider solution via Hyper API...")
 	checkURL, _, err := s.hyperAPI.GenerateDataDomeSlider(ctx, &hyper.DataDomeSliderInput{
 		UserAgent:      UserAgent,
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
+		Script:         s.script,
 		Puzzle:         base64.StdEncoding.EncodeToString(puzzle),
 		Piece:          base64.StdEncoding.EncodeToString(piece),
 		IP:             s.ip,

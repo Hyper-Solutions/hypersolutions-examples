@@ -4,8 +4,8 @@ github.com/Hyper-Solutions/orderedobject v1.0.0 h1:y91n3VD0fIzv3Zj9OA8ACqTJS+v8E
 github.com/Hyper-Solutions/orderedobject v1.0.0/go.mod h1:zv+R9tKJzKHsmriExjZbU2e0TT6fcXk+GE5QrrFln6Y=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
-github.com/Noooste/azuretls-client v1.12.12 h1:v+VjuZ0FBWM8b6ry8rwXusZVBeguft06HxiES79ILPo=
-github.com/Noooste/azuretls-client v1.12.12/go.mod h1:ON+SmiBm4Zy5vAhJmBNZk61Y7nqf4iM/b1MC1lN47Bk=
+github.com/Noooste/azuretls-client v1.13.2 h1:8Dli5aKP5O6qN/FNSGFVkpQ1V1F1gGawAkLIE2Nrk+U=
+github.com/Noooste/azuretls-client v1.13.2/go.mod h1:ON+SmiBm4Zy5vAhJmBNZk61Y7nqf4iM/b1MC1lN47Bk=
 github.com/Noooste/fhttp v1.0.15 h1:sYRWOKgr1x4L+wA6REMJCs4Z/lFOSJmuQHSIXMXCcPs=
 github.com/Noooste/fhttp v1.0.15/go.mod h1:YZtq+i2M11Y22UiOR6gjNSLMNLiPhURh6M44oFVQ1TE=
 github.com/Noooste/go-socks4 v0.0.2 h1:DwHCYiCEAdjfNrQOFIid7qgKCll7ubhGS1ji5O8FYng=
