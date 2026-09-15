@@ -24,7 +24,7 @@ from rnet import Client, Emulation, Proxy, Jar, HeaderMap, OrigHeaderMap
 
 from hyper_sdk import SessionAsync as HyperSession
 from hyper_sdk import SensorInput, SbsdInput
-from hyper_sdk.akamai import parse_script_path, is_cookie_valid
+from hyper_sdk.akamai import parse_akamai_script_path, is_cookie_valid
 
 
 # =============================================================================
@@ -403,7 +403,7 @@ class AkamaiSolver:
     def _parse_sensor_endpoint(self) -> bool:
         """Extracts the sensor script endpoint from page HTML."""
         try:
-            script_path = parse_script_path(self.page_html)
+            script_path = parse_akamai_script_path(self.page_html)
             parsed = urlparse(self.config.target_url)
             self.sensor_endpoint = f"{parsed.scheme}://{parsed.netloc}{script_path}"
             print(f"  Sensor endpoint: {self.sensor_endpoint}")

@@ -13,7 +13,7 @@ For more information, visit: https://docs.hypersolutions.co
 Join our Discord community: https://discord.gg/akamai
 """
 
-import json
+import base64
 import os
 import re
 import time
@@ -597,7 +597,7 @@ class DataDomeSolver:
         ]
 
         resp = self.session.get(self.captcha_path)
-        return resp.content.decode("latin-1")
+        return base64.b64encode(resp.content).decode("ascii")
 
     def _download_piece_image(self) -> str:
         """Downloads the slider piece image and returns as string."""
@@ -628,7 +628,7 @@ class DataDomeSolver:
         ]
 
         resp = self.session.get(piece_url)
-        return resp.content.decode("latin-1")
+        return base64.b64encode(resp.content).decode("ascii")
 
     def _submit_slider_solution(self, check_url: str) -> None:
         """Submits the generated slider solution."""
