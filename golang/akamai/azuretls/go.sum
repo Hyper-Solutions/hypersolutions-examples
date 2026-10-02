@@ -1,5 +1,5 @@
-github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.9.1 h1:52R1NLbFipiqGHzxzIFVhjvjJyK7c51Rr5a5gD4AxzA=
-github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.9.1/go.mod h1:CLuJrB/SSntyOkC4JEBnTH7r6QnQxXVjNcvXJkXrhXM=
+github.com/Hyper-Solutions/hyper-sdk-go/v3 v3.0.0 h1:Bj5d7SfFJt2nUcTNDaa5cUn8pwY51RQTvEb/vuJuA8s=
+github.com/Hyper-Solutions/hyper-sdk-go/v3 v3.0.0/go.mod h1:HpgXDjVdxQFOIAoQNj1VAF2Mk6KmYIFc+EEyf85EHbE=
 github.com/Hyper-Solutions/orderedobject v1.0.0 h1:y91n3VD0fIzv3Zj9OA8ACqTJS+v8EkoTj3VEe8cZWwA=
 github.com/Hyper-Solutions/orderedobject v1.0.0/go.mod h1:zv+R9tKJzKHsmriExjZbU2e0TT6fcXk+GE5QrrFln6Y=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=

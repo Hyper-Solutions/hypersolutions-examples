@@ -32,8 +32,8 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
-	"github.com/Hyper-Solutions/hyper-sdk-go/v2/kasada"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
+	"github.com/Hyper-Solutions/hyper-sdk-go/v3/kasada"
 )
 
 // =============================================================================

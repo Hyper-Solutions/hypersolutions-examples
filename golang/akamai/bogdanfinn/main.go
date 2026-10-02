@@ -31,8 +31,8 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
-	"github.com/Hyper-Solutions/hyper-sdk-go/v2/akamai"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
+	"github.com/Hyper-Solutions/hyper-sdk-go/v3/akamai"
 )
 
 // =============================================================================
@@ -215,6 +215,7 @@ type AkamaiSolver struct {
 	pageHTML       string
 	sbsdInfo       *SbsdInfo
 	sbsdScript     string
+	sbsdContext    string
 	sensorScript   string
 	sensorEndpoint string
 	sensorContext  string
@@ -454,15 +455,23 @@ func (s *AkamaiSolver) postSbsd(ctx context.Context, index int) error {
 		Uuid:           s.sbsdInfo.Uuid,
 		PageUrl:        s.config.TargetURL,
 		OCookie:        oCookie,
-		Script:         s.sbsdScript,
 		AcceptLanguage: s.config.AcceptLanguage,
 		IP:             s.ip,
+		Context:        s.sbsdContext,
 	}
 
-	payload, err := s.hyperAPI.GenerateSbsdData(ctx, input)
+	// Script and context are mutually exclusive
+	if s.sbsdContext == "" {
+		input.Script = s.sbsdScript
+	}
+
+	payload, sbsdContext, err := s.hyperAPI.GenerateSbsdData(ctx, input)
 	if err != nil {
 		return fmt.Errorf("Hyper API error: %w", err)
 	}
+
+	// Store context for subsequent requests
+	s.sbsdContext = sbsdContext
 
 	postURL, err := s.sbsdInfo.PostURL(s.config.TargetURL)
 	if err != nil {

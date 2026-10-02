@@ -29,7 +29,7 @@ import (
 	"github.com/Noooste/azuretls-client"
 	http "github.com/Noooste/fhttp"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
 )
 
 // =============================================================================

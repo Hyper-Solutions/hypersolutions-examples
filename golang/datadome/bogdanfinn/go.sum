@@ -1,5 +1,5 @@
-github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.11.0 h1:qfDYAsav6lPQSKAN/OIdxUd/ce5dXknjSghTYIK31/c=
-github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.11.0/go.mod h1:CLuJrB/SSntyOkC4JEBnTH7r6QnQxXVjNcvXJkXrhXM=
+github.com/Hyper-Solutions/hyper-sdk-go/v3 v3.0.0 h1:Bj5d7SfFJt2nUcTNDaa5cUn8pwY51RQTvEb/vuJuA8s=
+github.com/Hyper-Solutions/hyper-sdk-go/v3 v3.0.0/go.mod h1:HpgXDjVdxQFOIAoQNj1VAF2Mk6KmYIFc+EEyf85EHbE=
 github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
 github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/bdandy/go-errors v1.2.2 h1:WdFv/oukjTJCLa79UfkGmwX7ZxONAihKu4V0mLIs11Q=
