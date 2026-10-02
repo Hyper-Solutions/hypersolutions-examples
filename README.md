@@ -151,6 +151,9 @@ Protection-specific options are documented in each example file.
 5. Generate and POST sensor data (up to 3 times)
 6. Validate `_abck` cookie
 
+The first SBSD call sends the script and returns a context. Every SBSD call after it sends that
+context and omits the script, since the API rejects a request carrying both.
+
 ### DataDome
 
 1. Fetch target page to trigger DataDome
@@ -207,7 +210,7 @@ TLS fingerprints are configured to match Chrome 133 profile for consistency with
 ## Documentation
 
 - [Hyper Solutions Docs](https://docs.hypersolutions.co)
-- [Go SDK Reference](https://pkg.go.dev/github.com/Hyper-Solutions/hyper-sdk-go/v2)
+- [Go SDK Reference](https://pkg.go.dev/github.com/Hyper-Solutions/hyper-sdk-go/v3)
 - [JavaScript SDK (npm)](https://www.npmjs.com/package/hyper-sdk-js)
 - [Python SDK (PyPI)](https://pypi.org/project/hyper-sdk/)
 - [tlsclientwrapper](https://github.com/DemonMartin/tlsClient)

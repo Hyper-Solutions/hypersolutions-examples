@@ -32,7 +32,7 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
 )
 
 // =============================================================================

@@ -178,6 +178,7 @@ class AkamaiSolver:
         self.page_html: str = ""
         self.sbsd_info: Optional[SbsdInfo] = None
         self.sbsd_script: str = ""
+        self.sbsd_context: str = ""
         self.sensor_script: str = ""
         self.sensor_endpoint: str = ""
         self.sensor_context: str = ""
@@ -347,18 +348,23 @@ class AkamaiSolver:
         if not o_cookie:
             o_cookie = self._get_cookie("sbsd_o")
 
-        payload = await self.hyper_api.generate_sbsd_data(
+        payload, sbsd_context = await self.hyper_api.generate_sbsd_data(
             SbsdInput(
                 index=index,
                 user_agent=USER_AGENT,
                 uuid=self.sbsd_info.uuid,
                 page_url=self.config.target_url,
                 o_cookie=o_cookie,
-                script=self.sbsd_script,
+                # script and context are mutually exclusive
+                script=self.sbsd_script if not self.sbsd_context else "",
                 accept_language=self.config.accept_language,
                 ip=self.ip,
+                context=self.sbsd_context,
             )
         )
+
+        # Store context for subsequent requests
+        self.sbsd_context = sbsd_context
 
         post_url = self.sbsd_info.post_url(self.config.target_url)
 

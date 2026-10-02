@@ -195,6 +195,7 @@ class AkamaiSolver {
         this.pageHtml = '';
         this.sbsdInfo = null;
         this.sbsdScript = '';
+        this.sbsdContext = '';
         this.sensorScript = '';
         this.sensorEndpoint = '';
         this.sensorContext = '';
@@ -408,17 +409,22 @@ class AkamaiSolver {
             oCookie || '',
             this.config.targetUrl,
             USER_AGENT,
-            this.sbsdScript,
+            // script and context are mutually exclusive
+            this.sbsdContext ? '' : this.sbsdScript,
             this.ip,
             this.config.acceptLanguage,
+            this.sbsdContext,
         );
 
-        const payload = await generateSbsdPayload(this.hyperApi, sbsdInput);
+        const result = await generateSbsdPayload(this.hyperApi, sbsdInput);
+
+        // Store context for subsequent requests
+        this.sbsdContext = result.context || '';
 
         const postUrl = this.sbsdInfo.postUrl(this.config.targetUrl);
 
         // Wrap payload in JSON body
-        const bodyJson = JSON.stringify({ body: payload });
+        const bodyJson = JSON.stringify({ body: result.payload });
 
         const parsedUrl = new URL(this.config.targetUrl);
         const origin = `${parsedUrl.protocol}//${parsedUrl.host}`;
