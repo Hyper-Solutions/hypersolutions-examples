@@ -83,7 +83,7 @@ SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"'
 SEC_CH_UA_PLATFORM = '"Windows"'
 
 # SBSD regex pattern
-SBSD_REGEX = re.compile(r'(?i)([a-z\d/\-_\.]+)\?v=(.*?)(?:&.*?t=(.*?))?["\']')
+SBSD_REGEX = re.compile(r'(?i)([a-z\d/\-_\.]+)\?v=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&[^"\']*?\bt=([^"\'&]+))?[^"\']*["\']')
 
 
 # =============================================================================

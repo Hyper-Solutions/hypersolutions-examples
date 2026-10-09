@@ -111,7 +111,7 @@ type SbsdInfo struct {
 }
 
 // sbsdRegex extracts SBSD script information from page HTML.
-var sbsdRegex = regexp.MustCompile(`(?i)([a-z\d/\-_\.]+)\?v=(.*?)(?:&.*?t=(.*?))?["']`)
+var sbsdRegex = regexp.MustCompile(`(?i)([a-z\d/\-_\.]+)\?v=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&[^"']*?\bt=([^"'&]+))?[^"']*["']`)
 
 // parseSbsdInfo attempts to extract SBSD information from page HTML.
 // Returns nil if SBSD is not detected.
