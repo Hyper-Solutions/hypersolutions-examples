@@ -7,6 +7,8 @@
 //   - Fetching and solving ips.js challenges
 //   - Generating payload data (CT) and POW tokens (CD)
 //   - Handling BotID verification when required
+//   - Forwarding the client hints the payload call returns (sec-ch-ua and the
+//     Accept-CH hints the site asked for) on the following requests
 //   - The complete flow from initial request to successful bypass
 //
 // For more information, visit: https://docs.hypersolutions.co
@@ -23,6 +25,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +35,8 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
-	"github.com/Hyper-Solutions/hyper-sdk-go/v3/kasada"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v4"
+	"github.com/Hyper-Solutions/hyper-sdk-go/v4/kasada"
 )
 
 // =============================================================================
@@ -164,6 +167,9 @@ type KasadaSolver struct {
 		Fc string
 		H  string
 	}
+
+	// hints forwards the client hints of the payload call (see CLIENT HINTS)
+	hints clientHints
 }
 
 // NewKasadaSolver creates a new solver instance.
@@ -291,6 +297,7 @@ func (s *KasadaSolver) fetchPage(ctx context.Context) (int, []byte, error) {
 			"accept-language", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -304,6 +311,7 @@ func (s *KasadaSolver) fetchPage(ctx context.Context) (int, []byte, error) {
 	}
 
 	log.Printf("  Page response: %d", resp.StatusCode)
+	s.hints.record(resp.Header)
 
 	return resp.StatusCode, body, nil
 }
@@ -359,6 +367,7 @@ func (s *KasadaSolver) solveFromFpEndpoint(ctx context.Context) error {
 			"accept-language", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -421,6 +430,7 @@ func (s *KasadaSolver) fetchIpsScript(ctx context.Context) error {
 			"referer", "accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -448,23 +458,30 @@ func (s *KasadaSolver) solveChallenge(ctx context.Context) error {
 	log.Println("  Generating Kasada payload via Hyper API...")
 
 	// Generate payload
-	payload, headers, err := s.hyperAPI.GenerateKasadaPayload(ctx, &hyper.KasadaPayloadInput{
+	res, err := s.hyperAPI.GenerateKasadaPayload(ctx, &hyper.KasadaPayloadInput{
 		UserAgent:      UserAgent,
 		IpsLink:        s.ipsLink,
 		Script:         s.ipsScript,
 		AcceptLanguage: s.config.AcceptLanguage,
 		IP:             s.ip,
+		// The API refuses with an error instead of returning a payload when the script has a signal it cannot identify yet
+		Strict: true,
 	})
 	if err != nil {
 		return fmt.Errorf("Hyper API error: %w", err)
 	}
+
+	// res.Headers are the x-kpsdk-* headers for /tl. res.ClientHints are separate: forward them
+	// on the following requests to the site, never mixed into the x-kpsdk-* headers.
+	headers := res.Headers
+	s.hints.update(res.ClientHints)
 
 	log.Println("  Submitting payload to /tl...")
 
 	// Submit to /tl
 	tlURL := fmt.Sprintf("%s%s/tl", s.baseURL, KasadaBasePath)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", tlURL, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", tlURL, bytes.NewReader(res.Payload))
 	if err != nil {
 		return err
 	}
@@ -492,6 +509,7 @@ func (s *KasadaSolver) solveChallenge(ctx context.Context) error {
 			"accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	// Set Kasada headers from payload generation
 	if headers.XKpsdkCt != "" {
@@ -591,6 +609,7 @@ func (s *KasadaSolver) solveBotID(ctx context.Context) error {
 			"referer", "accept-encoding", "accept-language",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -610,7 +629,7 @@ func (s *KasadaSolver) solveBotID(ctx context.Context) error {
 	log.Printf("  BotID script fetched: %d bytes", len(body))
 
 	// Generate BotID header
-	isHumanHeader, err := s.hyperAPI.GenerateBotIDHeader(ctx, &hyper.BotIDHeaderInput{
+	botID, err := s.hyperAPI.GenerateBotIDHeader(ctx, &hyper.BotIDHeaderInput{
 		Script:         string(body),
 		UserAgent:      UserAgent,
 		IP:             s.ip,
@@ -620,6 +639,7 @@ func (s *KasadaSolver) solveBotID(ctx context.Context) error {
 		return fmt.Errorf("failed to generate BotID header: %w", err)
 	}
 
+	isHumanHeader := botID.Payload
 	log.Printf("  x-is-human header generated: %s...", isHumanHeader[:min(50, len(isHumanHeader))])
 
 	return nil
@@ -659,6 +679,7 @@ func (s *KasadaSolver) generatePow(ctx context.Context) error {
 			"accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -680,7 +701,7 @@ func (s *KasadaSolver) generatePow(ctx context.Context) error {
 	// Generate POW
 	log.Println("  Generating x-kpsdk-cd via Hyper API...")
 
-	cd, err := s.hyperAPI.GenerateKasadaPow(ctx, &hyper.KasadaPowInput{
+	pow, err := s.hyperAPI.GenerateKasadaPow(ctx, &hyper.KasadaPowInput{
 		St:     s.tlHeaders.St,
 		Ct:     s.tlHeaders.Ct,
 		Fc:     s.mfcHeaders.Fc,
@@ -694,7 +715,7 @@ func (s *KasadaSolver) generatePow(ctx context.Context) error {
 	log.Println("\n  ✅ POW generated successfully!")
 	log.Println("\n  Headers for protected API requests:")
 	log.Printf("    x-kpsdk-ct: %s", s.tlHeaders.Ct)
-	log.Printf("    x-kpsdk-cd: %s", cd)
+	log.Printf("    x-kpsdk-cd: %s", pow.Payload)
 	log.Printf("    x-kpsdk-h:  %s", s.mfcHeaders.H)
 	log.Printf("    x-kpsdk-v:  %s", KasadaVersion)
 
@@ -706,6 +727,70 @@ func (s *KasadaSolver) Close() {
 	if s.client != nil {
 		s.client.CloseIdleConnections()
 	}
+}
+
+// =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// clientHints forwards the client hints a Hyper generate call returned the way Chrome does:
+// sec-ch-ua, sec-ch-ua-mobile and sec-ch-ua-platform on every request, any other hint only
+// after the site asked for it in an Accept-CH response header.
+type clientHints struct {
+	values   hyper.ClientHints // from the latest generate call, nil until one returned hints
+	accepted map[string]bool   // lowercase hint names from the site's Accept-CH header
+}
+
+// record remembers the hints a document response from the site asked for in Accept-CH.
+func (c *clientHints) record(header http.Header) {
+	for _, name := range strings.Split(header.Get("Accept-CH"), ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if c.accepted == nil {
+			c.accepted = make(map[string]bool)
+		}
+		c.accepted[name] = true
+	}
+}
+
+// update keeps the hints of a generate result for the following requests.
+func (c *clientHints) update(values hyper.ClientHints) {
+	if len(values) > 0 {
+		c.values = values
+	}
+}
+
+// apply sets the hints on a request to the site. The three default hints replace the hardcoded
+// values; any other requested hint goes right after the last sec-ch-* header in the header order.
+func (c *clientHints) apply(header http.Header) {
+	var extra []string
+	for name, value := range c.values {
+		switch name {
+		case "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform":
+			header[name] = []string{value}
+		default:
+			if c.accepted[name] {
+				header[name] = []string{value}
+				extra = append(extra, name)
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	sort.Strings(extra)
+
+	order := header[http.HeaderOrderKey]
+	at := len(order)
+	for i, name := range order {
+		if strings.HasPrefix(strings.ToLower(name), "sec-ch-") {
+			at = i + 1
+		}
+	}
+	newOrder := append(append(append([]string{}, order[:at]...), extra...), order[at:]...)
+	header[http.HeaderOrderKey] = newOrder
 }
 
 // =============================================================================

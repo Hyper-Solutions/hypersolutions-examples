@@ -7,6 +7,8 @@
 //   - Fetching the Reese84 script content
 //   - Handling POW (Proof of Work) challenges when required
 //   - Generating and submitting Reese84 sensors via the Hyper API
+//   - Forwarding the client hints the sensor call returns (sec-ch-ua and the
+//     Accept-CH hints the site asked for) on the following requests
 //   - Handling the complete flow from initial request to successful bypass
 //
 // For more information, visit: https://docs.hypersolutions.co
@@ -24,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,7 +35,7 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v4"
 )
 
 // =============================================================================
@@ -171,6 +174,9 @@ type Reese84Solver struct {
 	path     string // Script path for sensor POST endpoint (e.g., /abc123/def456)
 	fullPath string // Full script path with query params for fetching
 	script   string // Full Reese84 script content
+
+	// hints forwards the client hints of the sensor call (see CLIENT HINTS)
+	hints clientHints
 }
 
 // NewReese84Solver creates a new solver instance.
@@ -287,6 +293,7 @@ func (s *Reese84Solver) makeInitialRequest(ctx context.Context) error {
 			"accept-language", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -299,6 +306,9 @@ func (s *Reese84Solver) makeInitialRequest(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// Remember the client hints the site asks for
+	s.hints.record(resp.Header)
 
 	// Check for Incapsula challenge page
 	if !bytes.Contains(body, []byte("Pardon Our Interruption")) {
@@ -363,6 +373,7 @@ func (s *Reese84Solver) fetchScript(ctx context.Context) error {
 			"referer", "accept-encoding", "accept-language",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -425,6 +436,7 @@ func (s *Reese84Solver) getPow(ctx context.Context) (string, error) {
 			"referer", "accept-encoding", "accept-language", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -466,12 +478,15 @@ func (s *Reese84Solver) generateSensor(ctx context.Context, pow string) (string,
 		Script:         s.script,
 	}
 
-	sensor, err := s.hyperAPI.GenerateReese84Sensor(ctx, input)
+	res, err := s.hyperAPI.GenerateReese84Sensor(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("Hyper API error: %w", err)
 	}
 
-	return sensor, nil
+	// Forward the client hints on the following requests to the site
+	s.hints.update(res.ClientHints)
+
+	return res.Payload, nil
 }
 
 // submitSensor posts the generated sensor to the Incapsula endpoint.
@@ -512,6 +527,7 @@ func (s *Reese84Solver) submitSensor(ctx context.Context, sensor string) error {
 			"accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -581,6 +597,7 @@ func (s *Reese84Solver) verifyAccess(ctx context.Context) (bool, error) {
 			"accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -615,6 +632,70 @@ func (s *Reese84Solver) Close() {
 	if s.client != nil {
 		s.client.CloseIdleConnections()
 	}
+}
+
+// =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// clientHints forwards the client hints a Hyper generate call returned the way Chrome does:
+// sec-ch-ua, sec-ch-ua-mobile and sec-ch-ua-platform on every request, any other hint only
+// after the site asked for it in an Accept-CH response header.
+type clientHints struct {
+	values   hyper.ClientHints // from the latest generate call, nil until one returned hints
+	accepted map[string]bool   // lowercase hint names from the site's Accept-CH header
+}
+
+// record remembers the hints a document response from the site asked for in Accept-CH.
+func (c *clientHints) record(header http.Header) {
+	for _, name := range strings.Split(header.Get("Accept-CH"), ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if c.accepted == nil {
+			c.accepted = make(map[string]bool)
+		}
+		c.accepted[name] = true
+	}
+}
+
+// update keeps the hints of a generate result for the following requests.
+func (c *clientHints) update(values hyper.ClientHints) {
+	if len(values) > 0 {
+		c.values = values
+	}
+}
+
+// apply sets the hints on a request to the site. The three default hints replace the hardcoded
+// values; any other requested hint goes right after the last sec-ch-* header in the header order.
+func (c *clientHints) apply(header http.Header) {
+	var extra []string
+	for name, value := range c.values {
+		switch name {
+		case "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform":
+			header[name] = []string{value}
+		default:
+			if c.accepted[name] {
+				header[name] = []string{value}
+				extra = append(extra, name)
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	sort.Strings(extra)
+
+	order := header[http.HeaderOrderKey]
+	at := len(order)
+	for i, name := range order {
+		if strings.HasPrefix(strings.ToLower(name), "sec-ch-") {
+			at = i + 1
+		}
+	}
+	newOrder := append(append(append([]string{}, order[:at]...), extra...), order[at:]...)
+	header[http.HeaderOrderKey] = newOrder
 }
 
 // =============================================================================

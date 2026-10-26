@@ -16,14 +16,14 @@ Join our Discord community: https://discord.gg/akamai
 import base64
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import tls_client
 
 from hyper_sdk import Session as HyperSession
 from hyper_sdk import KasadaPayloadInput, KasadaPowInput, BotIDHeaderInput
-from hyper_sdk.kasada import parse_script_path
+from hyper_sdk.kasada import parse_kasada_script_path
 
 
 # =============================================================================
@@ -84,6 +84,69 @@ KASADA_BASE_PATH = "/149e9513-01fa-4fb0-aad4-566afd725d1b/2d206a39-8ed7-437e-a3b
 
 
 # =============================================================================
+# CLIENT HINTS
+# =============================================================================
+
+# Chrome sends these client hints on every request; any other hint only goes
+# out once the site has asked for it in its Accept-CH response header.
+LOW_ENTROPY_HINTS = ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform")
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _insert_after_sec_ch(names: List[str], extra: List[str]) -> List[str]:
+    """Inserts extra right after the last sec-ch-* name (at the end when there is none)."""
+    present = {name.lower() for name in names}
+    extra = [name for name in extra if name not in present]
+    last = max((i for i, name in enumerate(names) if name.lower().startswith("sec-ch-")), default=len(names) - 1)
+    return names[:last + 1] + extra + names[last + 1:]
+
+
+class ClientHints:
+    """Forwards the client_hints a generate call returned the way Chrome does.
+
+    Until a generate call returns hints, the hardcoded SEC_CH_UA values above
+    go out. Accept-CH is recorded per origin from the responses.
+    """
+
+    def __init__(self) -> None:
+        self.hints: Dict[str, str] = {}
+        self.accept_ch: Dict[str, Set[str]] = {}
+
+    def update(self, hints: Optional[Dict[str, str]]) -> None:
+        """Stores the client_hints of a generate result (None when the API returned none)."""
+        if hints:
+            self.hints = dict(hints)
+
+    def record(self, url: str, accept_ch) -> None:
+        """Records the hints an origin asked for in its Accept-CH response header."""
+        if not accept_ch:
+            return
+        if isinstance(accept_ch, bytes):
+            accept_ch = accept_ch.decode()
+        self.accept_ch[_origin(url)] = {name.strip().lower() for name in accept_ch.split(",") if name.strip()}
+
+    def apply(self, url: str, headers: Dict[str, str], order: List[str]) -> Tuple[Dict[str, str], List[str]]:
+        """Returns headers and header order with the hints for url: the low-entropy
+        three replace the defaults, the others the origin asked for go right after
+        the last sec-ch-* header."""
+        out = {
+            name: self.hints.get(name.lower(), value) if name.lower() in LOW_ENTROPY_HINTS else value
+            for name, value in headers.items()
+        }
+        if not any(name.lower().startswith("sec-ch-") for name in out):
+            return out, list(order)
+
+        requested = self.accept_ch.get(_origin(url), set())
+        extra = [name for name in self.hints if name not in LOW_ENTROPY_HINTS and name in requested]
+        keys = _insert_after_sec_ch(list(out), extra)
+        return {name: out[name] if name in out else self.hints[name] for name in keys}, _insert_after_sec_ch(list(order), extra)
+
+
+# =============================================================================
 # KASADA SOLVER
 # =============================================================================
 
@@ -118,6 +181,9 @@ class KasadaSolver:
 
         # Create Hyper Solutions API session
         self.hyper_api = HyperSession(config.api_key)
+
+        # Client hints from the latest generate call, forwarded like Chrome
+        self.hints = ClientHints()
 
         # Internal state
         self.ip: str = ""
@@ -184,6 +250,16 @@ class KasadaSolver:
         resp = self.session.get("https://api.ipify.org")
         return resp.text.strip()
 
+    def _send(self, method: str, url: str, **kwargs):
+        """Sends a request with the headers set on the session plus the client
+        hints for url, and records the Accept-CH the response carries."""
+        self.session.headers, self.session.header_order = self.hints.apply(
+            url, dict(self.session.headers), list(self.session.header_order)
+        )
+        resp = self.session.execute_request(method, url, **kwargs)
+        self.hints.record(url, resp.headers.get("accept-ch"))
+        return resp
+
     def _fetch_page(self) -> Tuple[int, str]:
         """Makes a GET request to the page URL."""
         headers = {
@@ -210,7 +286,7 @@ class KasadaSolver:
             "sec-fetch-dest", "accept-encoding", "accept-language", "cookie", "priority",
         ]
 
-        resp = self.session.get(self.config.page_url)
+        resp = self._send("GET", self.config.page_url)
         print(f"  Page response: {resp.status_code}")
 
         return resp.status_code, resp.text
@@ -218,7 +294,7 @@ class KasadaSolver:
     def _solve_from_block_page(self, block_page_body: str) -> None:
         """Handles the flow when page returns 429."""
         # Extract ips.js URL from block page
-        ips_path = parse_script_path(block_page_body)
+        ips_path = parse_kasada_script_path(block_page_body)
         self.ips_link = self.base_url + ips_path
         print(f"  IPS script URL: {self.ips_link}")
 
@@ -257,7 +333,7 @@ class KasadaSolver:
             "referer", "accept-encoding", "accept-language", "cookie", "priority",
         ]
 
-        resp = self.session.get(fp_url)
+        resp = self._send("GET", fp_url)
 
         if resp.status_code != 429:
             raise Exception(f"/fp returned unexpected status code: {resp.status_code}")
@@ -265,7 +341,7 @@ class KasadaSolver:
         print("  /fp returned 429, extracting script...")
 
         # Extract ips.js URL
-        ips_path = parse_script_path(resp.text)
+        ips_path = parse_kasada_script_path(resp.text)
         self.ips_link = self.base_url + ips_path
         print(f"  IPS script URL: {self.ips_link}")
 
@@ -299,7 +375,7 @@ class KasadaSolver:
             "referer", "accept-encoding", "accept-language", "cookie", "priority",
         ]
 
-        resp = self.session.get(self.ips_link)
+        resp = self._send("GET", self.ips_link)
 
         if resp.status_code != 200:
             raise Exception(f"ips.js request returned {resp.status_code}")
@@ -312,18 +388,24 @@ class KasadaSolver:
         print("  Generating Kasada payload via Hyper API...")
 
         # Generate payload
-        payload_b64, headers_dict = self.hyper_api.generate_kasada_payload(
+        result = self.hyper_api.generate_kasada_payload(
             KasadaPayloadInput(
                 user_agent=USER_AGENT,
                 ips_link=self.ips_link,
                 script=self.ips_script,
                 accept_language=self.config.accept_language,
                 ip=self.ip,
+                # Fail with an error instead of returning a payload when the script has a signal the API cannot identify yet
+                strict=True,
             )
         )
 
+        # The Accept-CH hints go out with the sec-ch-* headers on the following
+        # requests; they are kept apart from the x-kpsdk-* headers in result.headers
+        self.hints.update(result.client_hints)
+
         # Decode base64 payload
-        payload = base64.b64decode(payload_b64)
+        payload = base64.b64decode(result.payload)
 
         print("  Submitting payload to /tl...")
 
@@ -351,7 +433,7 @@ class KasadaSolver:
         header_order = ["content-length"]
 
         # Add Kasada headers from payload generation
-        for key, value in headers_dict.items():
+        for key, value in result.headers.items():
             if value:
                 req_headers[key] = value
                 header_order.append(key)
@@ -366,7 +448,7 @@ class KasadaSolver:
         self.session.headers = req_headers
         self.session.header_order = header_order
 
-        resp = self.session.post(tl_url, data=payload)
+        resp = self._send("POST", tl_url, data=payload)
 
         if resp.status_code != 200:
             raise Exception(f"/tl returned {resp.status_code}")
@@ -416,7 +498,7 @@ class KasadaSolver:
             "referer", "accept-encoding", "accept-language","cookie", 
         ]
 
-        resp = self.session.get(botid_url)
+        resp = self._send("GET", botid_url)
 
         if resp.status_code != 200:
             raise Exception(f"BotID script request returned {resp.status_code}")
@@ -424,7 +506,7 @@ class KasadaSolver:
         print(f"  BotID script fetched: {len(resp.text)} bytes")
 
         # Generate BotID header
-        is_human_header = self.hyper_api.generate_botid_header(
+        botid = self.hyper_api.generate_botid_header(
             BotIDHeaderInput(
                 script=resp.text,
                 user_agent=USER_AGENT,
@@ -433,6 +515,7 @@ class KasadaSolver:
             )
         )
 
+        is_human_header = botid.payload
         print(f"  x-is-human header generated: {is_human_header[:50]}...")
 
     def _generate_pow(self) -> None:
@@ -467,7 +550,7 @@ class KasadaSolver:
             "accept-encoding", "accept-language", "cookie", "priority",
         ]
 
-        resp = self.session.get(mfc_url)
+        resp = self._send("GET", mfc_url)
 
         self.mfc_fc = resp.headers.get("x-kpsdk-fc", "")
         self.mfc_h = resp.headers.get("x-kpsdk-h", "")
@@ -477,7 +560,7 @@ class KasadaSolver:
         # Generate POW
         print("  Generating x-kpsdk-cd via Hyper API...")
 
-        cd = self.hyper_api.generate_kasada_pow(
+        pow_result = self.hyper_api.generate_kasada_pow(
             KasadaPowInput(
                 st=self.tl_st,
                 ct=self.tl_ct,
@@ -485,6 +568,7 @@ class KasadaSolver:
                 domain=self.domain,
             )
         )
+        cd = pow_result.payload
 
         print("\n  ✅ POW generated successfully!")
         print("\n  Headers for protected API requests:")

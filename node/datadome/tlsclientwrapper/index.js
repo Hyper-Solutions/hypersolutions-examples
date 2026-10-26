@@ -3,6 +3,7 @@
  *
  * This example demonstrates:
  *   - Setting up a TLS client session with Chrome browser impersonation
+ *   - Forwarding the client hints the Hyper API returns, as Chrome does (Accept-CH aware)
  *   - Detecting DataDome protection (interstitial vs slider captcha)
  *   - Solving interstitial challenges
  *   - Solving slider captcha challenges
@@ -85,6 +86,101 @@ const SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v=
 const SEC_CH_UA_PLATFORM = '"Windows"';
 
 // =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// Client hints Chrome sends on every request. The others (sec-ch-ua-arch,
+// sec-ch-ua-full-version-list, device-memory, ...) only go to an origin whose
+// Accept-CH response header asked for them.
+const DEFAULT_CLIENT_HINTS = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'];
+
+/**
+ * Reads a response header case-insensitively. The TLS client can return
+ * canonical-case names and array values.
+ * @param {{headers?: Object}} response
+ * @param {string} name
+ * @returns {string}
+ */
+function getResponseHeader(response, name) {
+    const headers = response?.headers || {};
+    const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) {
+        return '';
+    }
+    const value = headers[key];
+    return Array.isArray(value) ? value.join(', ') : String(value);
+}
+
+/**
+ * Forwards the client hints the Hyper API returns the way Chrome sends them.
+ */
+class ClientHints {
+    constructor() {
+        /** @type {Record<string, string>|null} Hints from the last generate call that returned them */
+        this.hints = null;
+        /** @type {Map<string, Set<string>>} Accept-CH hint names per origin */
+        this.acceptCh = new Map();
+    }
+
+    /**
+     * Stores the clientHints of a generate result. Results without hints keep
+     * the previous ones.
+     * @param {Record<string, string>|undefined} hints
+     */
+    update(hints) {
+        if (hints) {
+            this.hints = hints;
+        }
+    }
+
+    /**
+     * Records the Accept-CH header of a document response for its origin.
+     * @param {string} url
+     * @param {Object} response
+     */
+    recordAcceptCh(url, response) {
+        const value = getResponseHeader(response, 'accept-ch');
+        if (value) {
+            const names = value.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+            this.acceptCh.set(new URL(url).origin, new Set(names));
+        }
+    }
+
+    /**
+     * Sets the hints on a request: sec-ch-ua, sec-ch-ua-mobile and
+     * sec-ch-ua-platform always, every other hint only when the request's
+     * origin listed it in Accept-CH. Extra hints are ordered right after the
+     * last sec-ch-* header. Before the first generate call the hardcoded
+     * values stay.
+     * @param {string} url
+     * @param {Record<string, string>} headers
+     * @param {string[]} headerOrder
+     */
+    apply(url, headers, headerOrder) {
+        if (!this.hints) {
+            return;
+        }
+        const allowed = this.acceptCh.get(new URL(url).origin) || new Set();
+        const extra = [];
+        for (const [name, value] of Object.entries(this.hints)) {
+            if (DEFAULT_CLIENT_HINTS.includes(name) || allowed.has(name)) {
+                headers[name] = value;
+                if (!headerOrder.includes(name)) {
+                    extra.push(name);
+                }
+            }
+        }
+        let at = -1;
+        headerOrder.forEach((name, i) => {
+            if (name.startsWith('sec-ch-')) {
+                at = i;
+            }
+        });
+        headerOrder.splice(at + 1, 0, ...extra);
+    }
+}
+
+// =============================================================================
 // DATADOME SOLVER
 // =============================================================================
 
@@ -140,6 +236,9 @@ class DataDomeSolver {
 
         // Create Hyper Solutions API session
         this.hyperApi = new HyperSession(config.apiKey);
+
+        // Client hints from the Hyper API and the Accept-CH each origin asked for
+        this.clientHints = new ClientHints();
 
         // Internal state
         this.ip = '';
@@ -292,12 +391,14 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply(this.config.targetUrl, headers, headerOrder);
         const response = await this.session.get(this.config.targetUrl, {
             headers,
             headerOrder,
         });
 
         const body = response.body;
+        this.clientHints.recordAcceptCh(this.config.targetUrl, response);
 
         // Get the DataDome cookie value
         const ddCookie = await this._getDataDomeCookie();
@@ -363,12 +464,14 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply(this.config.targetUrl, headers, headerOrder);
         const response = await this.session.get(this.config.targetUrl, {
             headers,
             headerOrder,
         });
 
         const body = response.body;
+        this.clientHints.recordAcceptCh(this.config.targetUrl, response);
 
         // Check if we got another challenge (slider after interstitial)
         const ddCookie = await this._getDataDomeCookie();
@@ -426,6 +529,8 @@ class DataDomeSolver {
             )
         );
         const payload = result.payload;
+        // The client hints go on every request from here on
+        this.clientHints.update(result.clientHints);
 
         // Step 2d: Submit the interstitial payload
         console.log('  Submitting interstitial solution...');
@@ -472,6 +577,7 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply(this.deviceCheckLink, headers, headerOrder);
         const response = await this.session.get(this.deviceCheckLink, {
             headers,
             headerOrder,
@@ -531,6 +637,7 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply(scriptUrl, headers, headerOrder);
         const response = await this.session.get(scriptUrl, {
             headers,
             headerOrder,
@@ -587,6 +694,7 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply('https://geo.captcha-delivery.com/interstitial/', headers, headerOrder);
         const response = await this.session.post(
             'https://geo.captcha-delivery.com/interstitial/',
             payload,
@@ -645,6 +753,7 @@ class DataDomeSolver {
             )
         );
         const checkUrl = result.payload;
+        this.clientHints.update(result.clientHints);
 
         // Step 3e: Submit the slider solution
         console.log('  Submitting slider solution...');
@@ -691,6 +800,7 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply(this.deviceCheckLink, headers, headerOrder);
         const response = await this.session.get(this.deviceCheckLink, {
             headers,
             headerOrder,
@@ -745,6 +855,7 @@ class DataDomeSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.captchaPath, headers, headerOrder);
         const response = await this.session.get(this.captchaPath, {
             headers,
             headerOrder,
@@ -794,6 +905,7 @@ class DataDomeSolver {
             'priority',
         ];
 
+        this.clientHints.apply(pieceUrl, headers, headerOrder);
         const response = await this.session.get(pieceUrl, {
             headers,
             headerOrder,
@@ -844,6 +956,7 @@ class DataDomeSolver {
             'accept-language',
         ];
 
+        this.clientHints.apply(checkUrl, headers, headerOrder);
         const response = await this.session.get(checkUrl, {
             headers,
             headerOrder,
@@ -882,7 +995,7 @@ class DataDomeSolver {
         // First tags request: "ch" (challenge) type
         // ==========================================================================
         console.log('  Sending first tags request (type: ch)...');
-        const chPayload = await generateTagsPayload(
+        const chResult = await generateTagsPayload(
             this.hyperApi,
             new TagsInput(
                 USER_AGENT,
@@ -896,7 +1009,8 @@ class DataDomeSolver {
             )
         );
 
-        await this._postTags(chPayload);
+        this.clientHints.update(chResult.clientHints);
+        await this._postTags(chResult.payload);
 
         // ==========================================================================
         // Sleep between requests to simulate real user behavior
@@ -911,7 +1025,7 @@ class DataDomeSolver {
         cid = await this._getDataDomeCookie();
 
         console.log('  Sending second tags request (type: le)...');
-        const lePayload = await generateTagsPayload(
+        const leResult = await generateTagsPayload(
             this.hyperApi,
             new TagsInput(
                 USER_AGENT,
@@ -925,7 +1039,8 @@ class DataDomeSolver {
             )
         );
 
-        await this._postTags(lePayload);
+        this.clientHints.update(leResult.clientHints);
+        await this._postTags(leResult.payload);
 
         console.log('  Tags solved successfully!');
     }
@@ -975,6 +1090,7 @@ class DataDomeSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.config.tagsEndpoint, headers, headerOrder);
         const response = await this.session.post(this.config.tagsEndpoint, payload, {
             headers,
             headerOrder,
@@ -1032,6 +1148,7 @@ class DataDomeSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.config.targetUrl, headers, headerOrder);
         const response = await this.session.get(this.config.targetUrl, {
             headers,
             headerOrder,

@@ -3,6 +3,7 @@
  *
  * This example demonstrates:
  *   - Setting up a TLS client session with Chrome browser impersonation
+ *   - Forwarding the client hints the Hyper API returns, as Chrome does (Accept-CH aware)
  *   - Detecting Incapsula protection and extracting script paths
  *   - Fetching the Reese84 script content
  *   - Handling POW (Proof of Work) challenges when required
@@ -70,6 +71,101 @@ const SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v=
 const SEC_CH_UA_PLATFORM = '"Windows"';
 
 // =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// Client hints Chrome sends on every request. The others (sec-ch-ua-arch,
+// sec-ch-ua-full-version-list, device-memory, ...) only go to an origin whose
+// Accept-CH response header asked for them.
+const DEFAULT_CLIENT_HINTS = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'];
+
+/**
+ * Reads a response header case-insensitively. The TLS client can return
+ * canonical-case names and array values.
+ * @param {{headers?: Object}} response
+ * @param {string} name
+ * @returns {string}
+ */
+function getResponseHeader(response, name) {
+    const headers = response?.headers || {};
+    const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) {
+        return '';
+    }
+    const value = headers[key];
+    return Array.isArray(value) ? value.join(', ') : String(value);
+}
+
+/**
+ * Forwards the client hints the Hyper API returns the way Chrome sends them.
+ */
+class ClientHints {
+    constructor() {
+        /** @type {Record<string, string>|null} Hints from the last generate call that returned them */
+        this.hints = null;
+        /** @type {Map<string, Set<string>>} Accept-CH hint names per origin */
+        this.acceptCh = new Map();
+    }
+
+    /**
+     * Stores the clientHints of a generate result. Results without hints keep
+     * the previous ones.
+     * @param {Record<string, string>|undefined} hints
+     */
+    update(hints) {
+        if (hints) {
+            this.hints = hints;
+        }
+    }
+
+    /**
+     * Records the Accept-CH header of a document response for its origin.
+     * @param {string} url
+     * @param {Object} response
+     */
+    recordAcceptCh(url, response) {
+        const value = getResponseHeader(response, 'accept-ch');
+        if (value) {
+            const names = value.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+            this.acceptCh.set(new URL(url).origin, new Set(names));
+        }
+    }
+
+    /**
+     * Sets the hints on a request: sec-ch-ua, sec-ch-ua-mobile and
+     * sec-ch-ua-platform always, every other hint only when the request's
+     * origin listed it in Accept-CH. Extra hints are ordered right after the
+     * last sec-ch-* header. Before the first generate call the hardcoded
+     * values stay.
+     * @param {string} url
+     * @param {Record<string, string>} headers
+     * @param {string[]} headerOrder
+     */
+    apply(url, headers, headerOrder) {
+        if (!this.hints) {
+            return;
+        }
+        const allowed = this.acceptCh.get(new URL(url).origin) || new Set();
+        const extra = [];
+        for (const [name, value] of Object.entries(this.hints)) {
+            if (DEFAULT_CLIENT_HINTS.includes(name) || allowed.has(name)) {
+                headers[name] = value;
+                if (!headerOrder.includes(name)) {
+                    extra.push(name);
+                }
+            }
+        }
+        let at = -1;
+        headerOrder.forEach((name, i) => {
+            if (name.startsWith('sec-ch-')) {
+                at = i;
+            }
+        });
+        headerOrder.splice(at + 1, 0, ...extra);
+    }
+}
+
+// =============================================================================
 // INCAPSULA REESE84 SOLVER
 // =============================================================================
 
@@ -115,6 +211,9 @@ class Reese84Solver {
 
         // Create Hyper Solutions API session
         this.hyperApi = new HyperSession(config.apiKey);
+
+        // Client hints from the Hyper API and the Accept-CH each origin asked for
+        this.clientHints = new ClientHints();
 
         // Internal state
         this.ip = '';
@@ -211,12 +310,14 @@ class Reese84Solver {
             'priority',
         ];
 
+        this.clientHints.apply(this.config.targetUrl, headers, headerOrder);
         const response = await this.session.get(this.config.targetUrl, {
             headers,
             headerOrder,
         });
 
         const body = response.body;
+        this.clientHints.recordAcceptCh(this.config.targetUrl, response);
 
         // Check for Incapsula challenge page
         if (!body.includes('Pardon Our Interruption')) {
@@ -284,6 +385,7 @@ class Reese84Solver {
             'accept-language',
         ];
 
+        this.clientHints.apply(scriptUrl, headers, headerOrder);
         const response = await this.session.get(scriptUrl, {
             headers,
             headerOrder,
@@ -344,6 +446,7 @@ class Reese84Solver {
             'priority',
         ];
 
+        this.clientHints.apply(powUrl, headers, headerOrder);
         const response = await this.session.post(powUrl, powBody, {
             headers,
             headerOrder,
@@ -362,7 +465,7 @@ class Reese84Solver {
         const parsedUrl = new URL(this.config.targetUrl);
         const scriptUrl = `${parsedUrl.protocol}//${parsedUrl.host}${this.fullPath}`;
 
-        const sensor = await generateReese84Sensor(
+        const result = await generateReese84Sensor(
             this.hyperApi,
             new Reese84Input(
                 USER_AGENT,
@@ -375,7 +478,8 @@ class Reese84Solver {
             )
         );
 
-        return sensor;
+        this.clientHints.update(result.clientHints);
+        return result.payload;
     }
 
     /**
@@ -424,6 +528,7 @@ class Reese84Solver {
             'priority',
         ];
 
+        this.clientHints.apply(sensorUrl, headers, headerOrder);
         const response = await this.session.post(sensorUrl, sensor, {
             headers,
             headerOrder,
@@ -492,11 +597,13 @@ class Reese84Solver {
             'priority',
         ];
 
+        this.clientHints.apply(this.config.targetUrl, headers, headerOrder);
         const response = await this.session.get(this.config.targetUrl, {
             headers,
             headerOrder,
         });
 
+        this.clientHints.recordAcceptCh(this.config.targetUrl, response);
         const body = response.body;
 
         // Check if we're still seeing the challenge page
