@@ -8,7 +8,7 @@ Complete, working examples for bypassing modern bot protection systems using the
 
 | Protection | Description |
 |------------|-------------|
-| Akamai Bot Manager | Sensor data generation, SBSD challenges, cookie validation |
+| Akamai Bot Manager | Sensor data generation, SBSD challenges, cookie validation, Akamai-BM-Telemetry headers |
 | DataDome | Interstitial challenges, slider captcha, tags/signal collection |
 | Incapsula (Imperva) | Reese84 sensor generation, POW challenges |
 | Kasada | Payload generation (CT), POW tokens (CD), BotID verification |
@@ -19,6 +19,8 @@ Complete, working examples for bypassing modern bot protection systems using the
 ├── golang/
 │   ├── akamai/
 │   │   ├── azuretls/
+│   │   └── bogdanfinn/
+│   ├── akamai-telemetry/
 │   │   └── bogdanfinn/
 │   ├── datadome/
 │   │   ├── azuretls/
@@ -33,6 +35,8 @@ Complete, working examples for bypassing modern bot protection systems using the
 ├── node/
 │   ├── akamai/
 │   │   └── tlsclientwrapper/
+│   ├── akamai-telemetry/
+│   │   └── tlsclientwrapper/
 │   ├── datadome/
 │   │   └── tlsclientwrapper/
 │   ├── incapsula/
@@ -43,6 +47,8 @@ Complete, working examples for bypassing modern bot protection systems using the
 └── python/
     ├── akamai/
     │   ├── rnet/
+    │   └── tls-client/
+    ├── akamai-telemetry/
     │   └── tls-client/
     ├── datadome/
     │   ├── rnet/
@@ -101,6 +107,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## SDK Versions
+
+The examples use the result-object SDK majors:
+
+| SDK | Version |
+|-----|---------|
+| Go, `github.com/Hyper-Solutions/hyper-sdk-go/v4` | `v4.0.0` |
+| Python, `hyper-sdk` | `4.0.0` |
+| JS / TS, `hyper-sdk-js` | `5.0.0` |
+
+Every generate call returns an object (`payload`, `context`, client hints, ...) instead of positional values.
+
 ## Dependencies
 
 ### Go
@@ -152,7 +170,21 @@ Protection-specific options are documented in each example file.
 6. Validate `_abck` cookie
 
 The first SBSD call sends the script and returns a context. Every SBSD call after it sends that
-context and omits the script, since the API rejects a request carrying both.
+context and omits the script, since the API rejects a request carrying both. A hard block (an SBSD
+POST with a `t` parameter) always starts a new chain: script, no context. Each SBSD call also sends
+`scriptUrl`, the SBSD script's src exactly as the page loaded it.
+
+### Akamai-BM-Telemetry (`akamai-telemetry/`)
+
+Some sites protect their API with an `Akamai-BM-Telemetry` request header instead of a sensor post.
+The examples run the flow on resale.paylogic.com, on read-only endpoints only:
+
+1. Fetch the page and the Akamai script
+2. Get the get_params path from the API, then request it once for `j`
+3. Before every protected API call, generate a fresh header (chaining `context`) and send it as
+   `Akamai-BM-Telemetry`
+
+They never add a ticket to the basket: on Paylogic that reserves a real ticket that cannot be released.
 
 ### DataDome
 
@@ -183,10 +215,17 @@ and you pass the script body to the API when there is one.
 1. Fetch target page or `/fp` endpoint
 2. Detect 429 response and extract `ips.js` URL
 3. Fetch ips.js script
-4. Generate payload via API
+4. Generate payload via API (with `strict`, so the API refuses with an error instead of returning a payload when the script has a signal it cannot identify yet)
 5. POST payload to `/tl` endpoint
 6. Optional: solve BotID challenge
 7. Generate POW (x-kpsdk-cd) for protected requests
+
+## Client Hints
+
+The generate calls return the Accept-CH client hints for the device the payload describes. The
+examples send them the way Chrome does: `sec-ch-ua`, `sec-ch-ua-mobile` and `sec-ch-ua-platform`
+always, every other hint only when the site asked for it in its `Accept-CH` response header. On
+Kasada the hints are separate from the `x-kpsdk-*` headers, which always go on the request.
 
 ## Browser Fingerprinting
 

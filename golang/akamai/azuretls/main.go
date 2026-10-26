@@ -4,9 +4,12 @@
 // This example demonstrates:
 //   - Setting up an AzureTLS client with proper browser fingerprinting
 //   - Detecting and solving SBSD (State-Based Scraping Detection) challenges
-//   - Handling SBSD with and without the "t" parameter
+//   - Handling SBSD with and without the "t" parameter (context-only chaining,
+//     ScriptUrl is the script tag src exactly as the page loaded it)
 //   - Generating and submitting sensor data via the Hyper API
 //   - Cookie validation and the complete bypass flow
+//   - Forwarding the client hints each generate call returns (sec-ch-ua and the
+//     Accept-CH hints the site asked for) on the following requests
 //
 // For more information, visit: https://docs.hypersolutions.co
 // Join our Discord community: https://discord.gg/akamai
@@ -17,18 +20,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Noooste/azuretls-client"
 	http "github.com/Noooste/fhttp"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
-	"github.com/Hyper-Solutions/hyper-sdk-go/v3/akamai"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v4"
+	"github.com/Hyper-Solutions/hyper-sdk-go/v4/akamai"
 )
 
 // =============================================================================
@@ -101,32 +106,30 @@ const (
 
 // SbsdInfo holds extracted SBSD information from the page.
 type SbsdInfo struct {
+	Src  string // Script tag src as the page has it, query included
 	Path string // Script path (e.g., /abc/def)
 	Uuid string // UUID/version parameter
 	T    string // Optional "t" parameter (indicates hardblock if present)
 }
 
-// sbsdRegex extracts SBSD script information from page HTML.
-var sbsdRegex = regexp.MustCompile(`(?i)([a-z\d/\-_\.]+)\?v=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&[^"']*?\bt=([^"'&]+))?[^"']*["']`)
+// sbsdRegex extracts SBSD script information from page HTML: the whole src, its path, the uuid and the
+// optional t parameter.
+var sbsdRegex = regexp.MustCompile(`(?i)["']((?:https?://[^/"']+)?([a-z\d/\-_\.]+)\?v=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:&[^"']*?\bt=([^"'&]+))?[^"']*)["']`)
 
 // parseSbsdInfo attempts to extract SBSD information from page HTML.
 // Returns nil if SBSD is not detected.
-func parseSbsdInfo(html string) *SbsdInfo {
-	matches := sbsdRegex.FindStringSubmatch(html)
-	if len(matches) < 3 {
+func parseSbsdInfo(page string) *SbsdInfo {
+	matches := sbsdRegex.FindStringSubmatch(page)
+	if len(matches) < 4 {
 		return nil
 	}
 
-	info := &SbsdInfo{
-		Path: matches[1],
-		Uuid: matches[2],
+	return &SbsdInfo{
+		Src:  html.UnescapeString(matches[1]), // &amp;t=... in the attribute is &t=... on the wire
+		Path: matches[2],
+		Uuid: matches[3],
+		T:    matches[4],
 	}
-
-	if len(matches) >= 4 {
-		info.T = matches[3]
-	}
-
-	return info
 }
 
 // IsHardblock returns true if SBSD is in hardblock mode (t parameter present).
@@ -134,19 +137,20 @@ func (s *SbsdInfo) IsHardblock() bool {
 	return s.T != ""
 }
 
-// ScriptURL returns the full URL to fetch the SBSD script.
+// ScriptURL returns the absolute URL of the SBSD script exactly as the page loads it, query included
+// (?v=<uuid>, plus &t=... on a hard block). It is both the URL to fetch and the ScriptUrl for the Hyper API.
 func (s *SbsdInfo) ScriptURL(baseURL string) (string, error) {
-	u, err := url.Parse(baseURL)
+	base, err := url.Parse(baseURL)
 	if err != nil {
 		return "", err
 	}
 
-	scriptURL := fmt.Sprintf("%s://%s%s?v=%s", u.Scheme, u.Host, s.Path, s.Uuid)
-	if s.T != "" {
-		scriptURL += "&t=" + s.T
+	src, err := url.Parse(s.Src)
+	if err != nil {
+		return "", err
 	}
 
-	return scriptURL, nil
+	return base.ResolveReference(src).String(), nil
 }
 
 // PostURL returns the URL for posting SBSD payloads.
@@ -183,6 +187,9 @@ type AkamaiSolver struct {
 	sensorScript   string
 	sensorEndpoint string
 	sensorContext  string
+
+	// hints forwards the client hints of the latest generate call (see CLIENT HINTS)
+	hints clientHints
 }
 
 // NewAkamaiSolver creates a new solver instance.
@@ -313,6 +320,7 @@ func (s *AkamaiSolver) fetchPage(ctx context.Context) error {
 			"accept-language", "priority",
 		},
 	}
+	s.hints.apply(headers)
 
 	resp, err := s.session.Do(&azuretls.Request{
 		Method: "GET",
@@ -324,6 +332,7 @@ func (s *AkamaiSolver) fetchPage(ctx context.Context) error {
 	}
 
 	s.pageHTML = string(resp.Body)
+	s.hints.record(resp.Header)
 
 	// Check for SBSD
 	s.sbsdInfo = parseSbsdInfo(s.pageHTML)
@@ -343,9 +352,11 @@ func (s *AkamaiSolver) solveSbsd(ctx context.Context) error {
 	}
 
 	if s.sbsdInfo.IsHardblock() {
-		// Hardblock mode: post once, then reload page
+		// Hardblock mode: post once, then reload page. A hard block always sends the script with an
+		// empty context, never a context from an earlier request.
 		log.Println("  Hardblock mode: posting single SBSD payload...")
-		if err := s.postSbsd(ctx, 0); err != nil {
+		s.sbsdContext = ""
+		if err := s.postSbsd(ctx); err != nil {
 			return err
 		}
 
@@ -355,12 +366,13 @@ func (s *AkamaiSolver) solveSbsd(ctx context.Context) error {
 			return err
 		}
 	} else {
-		// Non-hardblock mode: post twice with index 0 and 1
+		// Non-hardblock mode: post twice. The first payload is built from the script, the second
+		// from the context the first call returned.
 		log.Println("  Non-hardblock mode: posting two SBSD payloads...")
-		if err := s.postSbsd(ctx, 0); err != nil {
+		if err := s.postSbsd(ctx); err != nil {
 			return err
 		}
-		if err := s.postSbsd(ctx, 1); err != nil {
+		if err := s.postSbsd(ctx); err != nil {
 			return err
 		}
 	}
@@ -394,6 +406,7 @@ func (s *AkamaiSolver) fetchSbsdScript(ctx context.Context) error {
 			"referer", "accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(headers)
 
 	resp, err := s.session.Do(&azuretls.Request{
 		Method: "GET",
@@ -411,36 +424,43 @@ func (s *AkamaiSolver) fetchSbsdScript(ctx context.Context) error {
 }
 
 // postSbsd submits an SBSD payload.
-func (s *AkamaiSolver) postSbsd(ctx context.Context, index int) error {
+func (s *AkamaiSolver) postSbsd(ctx context.Context) error {
 	// Get the O cookie (bm_so or sbsd_o)
 	oCookie := s.getCookie("bm_so")
 	if oCookie == "" {
 		oCookie = s.getCookie("sbsd_o")
 	}
 
+	scriptURL, err := s.sbsdInfo.ScriptURL(s.config.TargetURL)
+	if err != nil {
+		return err
+	}
+
 	input := &hyper.SbsdInput{
-		Index:          index,
 		UserAgent:      UserAgent,
 		Uuid:           s.sbsdInfo.Uuid,
 		PageUrl:        s.config.TargetURL,
 		OCookie:        oCookie,
+		ScriptUrl:      scriptURL,
 		AcceptLanguage: s.config.AcceptLanguage,
 		IP:             s.ip,
 		Context:        s.sbsdContext,
 	}
 
-	// Script and context are mutually exclusive
+	// Script and context are mutually exclusive: the first request of a chain sends the script with an
+	// empty context, later ones send the returned context
 	if s.sbsdContext == "" {
 		input.Script = s.sbsdScript
 	}
 
-	payload, sbsdContext, err := s.hyperAPI.GenerateSbsdData(ctx, input)
+	res, err := s.hyperAPI.GenerateSbsdData(ctx, input)
 	if err != nil {
 		return fmt.Errorf("Hyper API error: %w", err)
 	}
 
-	// Store context for subsequent requests
-	s.sbsdContext = sbsdContext
+	// Store context for subsequent requests, and the client hints for the next requests to the site
+	s.sbsdContext = res.Context
+	s.hints.update(res.ClientHints)
 
 	postURL, err := s.sbsdInfo.PostURL(s.config.TargetURL)
 	if err != nil {
@@ -448,7 +468,7 @@ func (s *AkamaiSolver) postSbsd(ctx context.Context, index int) error {
 	}
 
 	// Wrap payload in JSON body
-	bodyJSON, err := json.Marshal(map[string]string{"body": payload})
+	bodyJSON, err := json.Marshal(map[string]string{"body": res.Payload})
 	if err != nil {
 		return err
 	}
@@ -477,6 +497,7 @@ func (s *AkamaiSolver) postSbsd(ctx context.Context, index int) error {
 			"accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(headers)
 
 	_, err = s.session.Do(&azuretls.Request{
 		Method: "POST",
@@ -488,7 +509,7 @@ func (s *AkamaiSolver) postSbsd(ctx context.Context, index int) error {
 		return err
 	}
 
-	log.Printf("  SBSD payload %d submitted", index)
+	log.Println("  SBSD payload submitted")
 
 	return nil
 }
@@ -532,6 +553,7 @@ func (s *AkamaiSolver) fetchSensorScript(ctx context.Context) error {
 			"referer", "accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(headers)
 
 	resp, err := s.session.Do(&azuretls.Request{
 		Method: "GET",
@@ -567,16 +589,17 @@ func (s *AkamaiSolver) postSensor(ctx context.Context, iteration int) error {
 		input.Script = s.sensorScript
 	}
 
-	sensorData, sensorContext, err := s.hyperAPI.GenerateSensorData(ctx, input)
+	res, err := s.hyperAPI.GenerateSensorData(ctx, input)
 	if err != nil {
 		return fmt.Errorf("Hyper API error: %w", err)
 	}
 
-	// Store context for subsequent requests
-	s.sensorContext = sensorContext
+	// Store context for subsequent requests, and the client hints for the next requests to the site
+	s.sensorContext = res.Context
+	s.hints.update(res.ClientHints)
 
 	// Wrap sensor data in JSON
-	bodyJSON, err := json.Marshal(map[string]string{"sensor_data": sensorData})
+	bodyJSON, err := json.Marshal(map[string]string{"sensor_data": res.Payload})
 	if err != nil {
 		return err
 	}
@@ -605,6 +628,7 @@ func (s *AkamaiSolver) postSensor(ctx context.Context, iteration int) error {
 			"accept-encoding", "accept-language", "cookie", "priority",
 		},
 	}
+	s.hints.apply(headers)
 
 	_, err = s.session.Do(&azuretls.Request{
 		Method: "POST",
@@ -641,6 +665,70 @@ func (s *AkamaiSolver) Close() {
 	if s.session != nil {
 		s.session.Close()
 	}
+}
+
+// =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// clientHints forwards the client hints a Hyper generate call returned the way Chrome does:
+// sec-ch-ua, sec-ch-ua-mobile and sec-ch-ua-platform on every request, any other hint only
+// after the site asked for it in an Accept-CH response header.
+type clientHints struct {
+	values   hyper.ClientHints // from the latest generate call, nil until one returned hints
+	accepted map[string]bool   // lowercase hint names from the site's Accept-CH header
+}
+
+// record remembers the hints a document response from the site asked for in Accept-CH.
+func (c *clientHints) record(header http.Header) {
+	for _, name := range strings.Split(header.Get("Accept-CH"), ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if c.accepted == nil {
+			c.accepted = make(map[string]bool)
+		}
+		c.accepted[name] = true
+	}
+}
+
+// update keeps the hints of a generate result for the following requests.
+func (c *clientHints) update(values hyper.ClientHints) {
+	if len(values) > 0 {
+		c.values = values
+	}
+}
+
+// apply sets the hints on a request to the site. The three default hints replace the hardcoded
+// values; any other requested hint goes right after the last sec-ch-* header in the header order.
+func (c *clientHints) apply(header http.Header) {
+	var extra []string
+	for name, value := range c.values {
+		switch name {
+		case "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform":
+			header[name] = []string{value}
+		default:
+			if c.accepted[name] {
+				header[name] = []string{value}
+				extra = append(extra, name)
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	sort.Strings(extra)
+
+	order := header[http.HeaderOrderKey]
+	at := len(order)
+	for i, name := range order {
+		if strings.HasPrefix(strings.ToLower(name), "sec-ch-") {
+			at = i + 1
+		}
+	}
+	newOrder := append(append(append([]string{}, order[:at]...), extra...), order[at:]...)
+	header[http.HeaderOrderKey] = newOrder
 }
 
 // =============================================================================

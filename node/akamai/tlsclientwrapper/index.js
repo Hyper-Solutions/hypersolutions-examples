@@ -3,6 +3,7 @@
  *
  * This example demonstrates:
  *   - Setting up a TLS client session with Chrome browser impersonation
+ *   - Forwarding the client hints the Hyper API returns, as Chrome does (Accept-CH aware)
  *   - Detecting and solving SBSD (State-Based Scraping Detection) challenges
  *   - Handling SBSD with and without the "t" parameter
  *   - Generating and submitting sensor data via the Hyper API
@@ -70,6 +71,101 @@ const SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v=
 // sec-ch-ua-platform header value
 const SEC_CH_UA_PLATFORM = '"Windows"';
 
+// =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// Client hints Chrome sends on every request. The others (sec-ch-ua-arch,
+// sec-ch-ua-full-version-list, device-memory, ...) only go to an origin whose
+// Accept-CH response header asked for them.
+const DEFAULT_CLIENT_HINTS = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'];
+
+/**
+ * Reads a response header case-insensitively. The TLS client can return
+ * canonical-case names and array values.
+ * @param {{headers?: Object}} response
+ * @param {string} name
+ * @returns {string}
+ */
+function getResponseHeader(response, name) {
+    const headers = response?.headers || {};
+    const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) {
+        return '';
+    }
+    const value = headers[key];
+    return Array.isArray(value) ? value.join(', ') : String(value);
+}
+
+/**
+ * Forwards the client hints the Hyper API returns the way Chrome sends them.
+ */
+class ClientHints {
+    constructor() {
+        /** @type {Record<string, string>|null} Hints from the last generate call that returned them */
+        this.hints = null;
+        /** @type {Map<string, Set<string>>} Accept-CH hint names per origin */
+        this.acceptCh = new Map();
+    }
+
+    /**
+     * Stores the clientHints of a generate result. Results without hints keep
+     * the previous ones.
+     * @param {Record<string, string>|undefined} hints
+     */
+    update(hints) {
+        if (hints) {
+            this.hints = hints;
+        }
+    }
+
+    /**
+     * Records the Accept-CH header of a document response for its origin.
+     * @param {string} url
+     * @param {Object} response
+     */
+    recordAcceptCh(url, response) {
+        const value = getResponseHeader(response, 'accept-ch');
+        if (value) {
+            const names = value.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+            this.acceptCh.set(new URL(url).origin, new Set(names));
+        }
+    }
+
+    /**
+     * Sets the hints on a request: sec-ch-ua, sec-ch-ua-mobile and
+     * sec-ch-ua-platform always, every other hint only when the request's
+     * origin listed it in Accept-CH. Extra hints are ordered right after the
+     * last sec-ch-* header. Before the first generate call the hardcoded
+     * values stay.
+     * @param {string} url
+     * @param {Record<string, string>} headers
+     * @param {string[]} headerOrder
+     */
+    apply(url, headers, headerOrder) {
+        if (!this.hints) {
+            return;
+        }
+        const allowed = this.acceptCh.get(new URL(url).origin) || new Set();
+        const extra = [];
+        for (const [name, value] of Object.entries(this.hints)) {
+            if (DEFAULT_CLIENT_HINTS.includes(name) || allowed.has(name)) {
+                headers[name] = value;
+                if (!headerOrder.includes(name)) {
+                    extra.push(name);
+                }
+            }
+        }
+        let at = -1;
+        headerOrder.forEach((name, i) => {
+            if (name.startsWith('sec-ch-')) {
+                at = i;
+            }
+        });
+        headerOrder.splice(at + 1, 0, ...extra);
+    }
+}
+
 // SBSD regex pattern
 const SBSD_REGEX = /(?:([a-z\d/\-_\.]+)\?v=(.*?)(?:&.*?t=(.*?))?["'])/i;
 
@@ -85,11 +181,13 @@ class SbsdInfo {
      * @param {string} path - Script path (e.g., /abc/def)
      * @param {string} uuid - UUID/version parameter
      * @param {string} t - Optional "t" parameter (indicates hardblock if present)
+     * @param {string} src - The script tag's src exactly as written in the page
      */
-    constructor(path, uuid, t = '') {
+    constructor(path, uuid, t = '', src = '') {
         this.path = path;
         this.uuid = uuid;
         this.t = t;
+        this.src = src;
     }
 
     /**
@@ -101,17 +199,14 @@ class SbsdInfo {
     }
 
     /**
-     * Returns the full URL to fetch the SBSD script.
-     * @param {string} baseUrl
+     * Returns the absolute URL of the SBSD script exactly as the browser loads
+     * it (the tag's src resolved against the page, query included). The script
+     * is fetched from this URL and it is the scriptUrl sent to the Hyper API.
+     * @param {string} pageUrl
      * @returns {string}
      */
-    scriptUrl(baseUrl) {
-        const url = new URL(baseUrl);
-        let scriptUrl = `${url.protocol}//${url.host}${this.path}?v=${this.uuid}`;
-        if (this.t) {
-            scriptUrl += `&t=${this.t}`;
-        }
-        return scriptUrl;
+    scriptUrl(pageUrl) {
+        return new URL(this.src, pageUrl).href;
     }
 
     /**
@@ -140,7 +235,9 @@ function parseSbsdInfo(html) {
         return null;
     }
 
-    return new SbsdInfo(matches[1], matches[2], matches[3] || '');
+    // The full match ends with the closing quote; HTML encodes & as &amp;
+    const src = matches[0].slice(0, -1).replace(/&amp;/g, '&');
+    return new SbsdInfo(matches[1], matches[2], matches[3] || '', src);
 }
 
 // =============================================================================
@@ -189,6 +286,9 @@ class AkamaiSolver {
 
         // Create Hyper Solutions API session
         this.hyperApi = new HyperSession(config.apiKey);
+
+        // Client hints from the Hyper API and the Accept-CH each origin asked for
+        this.clientHints = new ClientHints();
 
         // Internal state
         this.ip = '';
@@ -303,12 +403,14 @@ class AkamaiSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.config.targetUrl, headers, headerOrder);
         const response = await this.session.get(this.config.targetUrl, {
             headers,
             headerOrder,
         });
 
         this.pageHtml = response.body;
+        this.clientHints.recordAcceptCh(this.config.targetUrl, response);
 
         // Check for SBSD
         this.sbsdInfo = parseSbsdInfo(this.pageHtml);
@@ -328,19 +430,24 @@ class AkamaiSolver {
         console.log('  Fetching SBSD script...');
         await this._fetchSbsdScript();
 
+        // SBSD is context-only: the first payload is built from the script with
+        // an empty context, every later one from the context the API returned.
         if (this.sbsdInfo.isHardblock()) {
-            // Hardblock mode: post once, then reload page
+            // Hardblock mode (POST with a "t" parameter): a single payload that
+            // always starts from the script and an empty context, then reload
             console.log('  Hardblock mode: posting single SBSD payload...');
-            await this._postSbsd(0);
+            this.sbsdContext = '';
+            await this._postSbsd();
 
             // Reload the page
             console.log('  Reloading page after SBSD...');
             await this._fetchPage();
         } else {
-            // Non-hardblock mode: post twice with index 0 and 1
+            // Non-hardblock mode: post twice, the second chained from the first
             console.log('  Non-hardblock mode: posting two SBSD payloads...');
-            await this._postSbsd(0);
-            await this._postSbsd(1);
+            this.sbsdContext = '';
+            await this._postSbsd();
+            await this._postSbsd();
         }
     }
 
@@ -382,6 +489,7 @@ class AkamaiSolver {
             'priority',
         ];
 
+        this.clientHints.apply(scriptUrl, headers, headerOrder);
         const response = await this.session.get(scriptUrl, {
             headers,
             headerOrder,
@@ -392,11 +500,11 @@ class AkamaiSolver {
     }
 
     /**
-     * Submits an SBSD payload.
-     * @param {number} index
+     * Submits an SBSD payload, chained from this.sbsdContext (empty starts a
+     * new chain from the script).
      * @returns {Promise<void>}
      */
-    async _postSbsd(index) {
+    async _postSbsd() {
         // Get the O cookie (bm_so or sbsd_o)
         let oCookie = await this._getCookie('bm_so');
         if (!oCookie) {
@@ -404,7 +512,6 @@ class AkamaiSolver {
         }
 
         const sbsdInput = new SbsdInput(
-            index,
             this.sbsdInfo.uuid,
             oCookie || '',
             this.config.targetUrl,
@@ -414,12 +521,15 @@ class AkamaiSolver {
             this.ip,
             this.config.acceptLanguage,
             this.sbsdContext,
+            // Absolute src of the SBSD script tag exactly as loaded, query included
+            this.sbsdInfo.scriptUrl(this.config.targetUrl),
         );
 
         const result = await generateSbsdPayload(this.hyperApi, sbsdInput);
 
         // Store context for subsequent requests
         this.sbsdContext = result.context || '';
+        this.clientHints.update(result.clientHints);
 
         const postUrl = this.sbsdInfo.postUrl(this.config.targetUrl);
 
@@ -465,12 +575,13 @@ class AkamaiSolver {
             'priority',
         ];
 
+        this.clientHints.apply(postUrl, headers, headerOrder);
         await this.session.post(postUrl, bodyJson, {
             headers,
             headerOrder,
         });
 
-        console.log(`  SBSD payload ${index} submitted`);
+        console.log('  SBSD payload submitted');
     }
 
     /**
@@ -529,6 +640,7 @@ class AkamaiSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.sensorEndpoint, headers, headerOrder);
         const response = await this.session.get(this.sensorEndpoint, {
             headers,
             headerOrder,
@@ -562,6 +674,7 @@ class AkamaiSolver {
 
         // Store context for subsequent requests
         this.sensorContext = result.context || '';
+        this.clientHints.update(result.clientHints);
 
         // Wrap sensor data in JSON
         const bodyJson = JSON.stringify({ sensor_data: result.payload });
@@ -605,6 +718,7 @@ class AkamaiSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.sensorEndpoint, headers, headerOrder);
         await this.session.post(this.sensorEndpoint, bodyJson, {
             headers,
             headerOrder,

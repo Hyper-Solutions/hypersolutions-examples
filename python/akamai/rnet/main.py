@@ -17,8 +17,9 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional
-from urllib.parse import urlparse
+from html import unescape
+from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urljoin, urlparse
 
 from rnet import Client, Emulation, Proxy, Jar, HeaderMap, OrigHeaderMap
 
@@ -96,23 +97,22 @@ class SbsdInfo:
     path: str  # Script path (e.g., /abc/def)
     uuid: str  # UUID/version parameter
     t: str = ""  # Optional "t" parameter (indicates hardblock if present)
+    src: str = ""  # The script tag's src as the page has it, query included
 
     def is_hardblock(self) -> bool:
         """Returns True if SBSD is in hardblock mode (t parameter present)."""
         return self.t != ""
 
-    def script_url(self, base_url: str) -> str:
-        """Returns the full URL to fetch the SBSD script."""
-        parsed = urlparse(base_url)
-        script_url = f"{parsed.scheme}://{parsed.netloc}{self.path}?v={self.uuid}"
-        if self.t:
-            script_url += f"&t={self.t}"
-        return script_url
+    def script_url(self, page_url: str) -> str:
+        """Returns the absolute URL of the SBSD script exactly as the page loads it:
+        the tag's src resolved against the page, query included. This is what the
+        browser fetches and what SbsdInput.script_url takes."""
+        return urljoin(page_url, unescape(self.src))
 
-    def post_url(self, base_url: str) -> str:
+    def post_url(self, page_url: str) -> str:
         """Returns the URL for posting SBSD payloads."""
-        parsed = urlparse(base_url)
-        post_url = f"{parsed.scheme}://{parsed.netloc}{self.path}"
+        parsed = urlparse(self.script_url(page_url))
+        post_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
         if self.t:
             post_url += f"?t={self.t}"
         return post_url
@@ -127,12 +127,77 @@ def parse_sbsd_info(html: str) -> Optional[SbsdInfo]:
     info = SbsdInfo(
         path=matches.group(1),
         uuid=matches.group(2),
+        # the whole match up to the closing quote is the src
+        src=matches.group(0)[:-1],
     )
 
     if matches.group(3):
         info.t = matches.group(3)
 
     return info
+
+
+# =============================================================================
+# CLIENT HINTS
+# =============================================================================
+
+# Chrome sends these client hints on every request; any other hint only goes
+# out once the site has asked for it in its Accept-CH response header.
+LOW_ENTROPY_HINTS = ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform")
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _insert_after_sec_ch(names: List[str], extra: List[str]) -> List[str]:
+    """Inserts extra right after the last sec-ch-* name (at the end when there is none)."""
+    present = {name.lower() for name in names}
+    extra = [name for name in extra if name not in present]
+    last = max((i for i, name in enumerate(names) if name.lower().startswith("sec-ch-")), default=len(names) - 1)
+    return names[:last + 1] + extra + names[last + 1:]
+
+
+class ClientHints:
+    """Forwards the client_hints a generate call returned the way Chrome does.
+
+    Until a generate call returns hints, the hardcoded SEC_CH_UA values above
+    go out. Accept-CH is recorded per origin from the responses.
+    """
+
+    def __init__(self) -> None:
+        self.hints: Dict[str, str] = {}
+        self.accept_ch: Dict[str, Set[str]] = {}
+
+    def update(self, hints: Optional[Dict[str, str]]) -> None:
+        """Stores the client_hints of a generate result (None when the API returned none)."""
+        if hints:
+            self.hints = dict(hints)
+
+    def record(self, url: str, accept_ch) -> None:
+        """Records the hints an origin asked for in its Accept-CH response header."""
+        if not accept_ch:
+            return
+        if isinstance(accept_ch, bytes):
+            accept_ch = accept_ch.decode()
+        self.accept_ch[_origin(url)] = {name.strip().lower() for name in accept_ch.split(",") if name.strip()}
+
+    def apply(self, url: str, headers: Dict[str, str], order: List[str]) -> Tuple[Dict[str, str], List[str]]:
+        """Returns headers and header order with the hints for url: the low-entropy
+        three replace the defaults, the others the origin asked for go right after
+        the last sec-ch-* header."""
+        out = {
+            name: self.hints.get(name.lower(), value) if name.lower() in LOW_ENTROPY_HINTS else value
+            for name, value in headers.items()
+        }
+        if not any(name.lower().startswith("sec-ch-") for name in out):
+            return out, list(order)
+
+        requested = self.accept_ch.get(_origin(url), set())
+        extra = [name for name in self.hints if name not in LOW_ENTROPY_HINTS and name in requested]
+        keys = _insert_after_sec_ch(list(out), extra)
+        return {name: out[name] if name in out else self.hints[name] for name in keys}, _insert_after_sec_ch(list(order), extra)
 
 
 # =============================================================================
@@ -173,11 +238,15 @@ class AkamaiSolver:
         # Create Hyper Solutions API session (async)
         self.hyper_api = HyperSession(config.api_key)
 
+        # Client hints from the latest generate call, forwarded like Chrome
+        self.hints = ClientHints()
+
         # Internal state
         self.ip: str = ""
         self.page_html: str = ""
         self.sbsd_info: Optional[SbsdInfo] = None
         self.sbsd_script: str = ""
+        self.sbsd_script_url: str = ""
         self.sbsd_context: str = ""
         self.sensor_script: str = ""
         self.sensor_endpoint: str = ""
@@ -237,6 +306,20 @@ class AkamaiSolver:
         text = await resp.text()
         return text.strip()
 
+    async def _send(self, method: str, url: str, headers: dict, orig_headers: list, **kwargs):
+        """Sends a request with the client hints for url added to headers, and
+        records the Accept-CH the response carries."""
+        headers, orig_headers = self.hints.apply(url, headers, orig_headers)
+        send = self.client.get if method == "GET" else self.client.post
+        resp = await send(
+            url,
+            headers=self._build_headers(headers),
+            orig_headers=self._build_header_order(orig_headers),
+            **kwargs,
+        )
+        self.hints.record(url, resp.headers.get("accept-ch"))
+        return resp
+
     def _build_headers(self, header_dict: dict) -> HeaderMap:
         """Build a HeaderMap from a dictionary."""
         headers = HeaderMap()
@@ -253,7 +336,7 @@ class AkamaiSolver:
 
     async def _fetch_page(self) -> None:
         """Makes a GET request to the target page and extracts protection info."""
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
@@ -267,16 +350,16 @@ class AkamaiSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=0, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "upgrade-insecure-requests", "user-agent", "accept",
             "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user",
             "sec-fetch-dest", "accept-encoding", "accept-language", "priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.config.target_url,
             headers=headers,
             orig_headers=header_order,
@@ -303,7 +386,7 @@ class AkamaiSolver:
             print("  Reloading page after SBSD...")
             await self._fetch_page()
         else:
-            # Non-hardblock mode: post twice with index 0 and 1
+            # Non-hardblock mode: post twice, the second one chaining the first's context
             print("  Non-hardblock mode: posting two SBSD payloads...")
             await self._post_sbsd(0)
             await self._post_sbsd(1)
@@ -311,8 +394,9 @@ class AkamaiSolver:
     async def _fetch_sbsd_script(self) -> None:
         """Retrieves the SBSD script content."""
         script_url = self.sbsd_info.script_url(self.config.target_url)
+        self.sbsd_script_url = script_url
 
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "user-agent": USER_AGENT,
             "sec-ch-ua": SEC_CH_UA,
@@ -325,15 +409,15 @@ class AkamaiSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=1",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "sec-ch-ua-platform", "user-agent", "sec-ch-ua", "sec-ch-ua-mobile",
             "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
             "referer", "accept-encoding", "accept-language", "cookie", "priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             script_url,
             headers=headers,
             orig_headers=header_order,
@@ -348,23 +432,31 @@ class AkamaiSolver:
         if not o_cookie:
             o_cookie = self._get_cookie("sbsd_o")
 
-        payload, sbsd_context = await self.hyper_api.generate_sbsd_data(
+        # SBSD is context-only: the first request sends the script with an empty
+        # context, later ones send the context the previous one returned. A hard
+        # block (the "t" parameter) always sends the script and an empty context.
+        context = "" if self.sbsd_info.is_hardblock() else self.sbsd_context
+
+        result = await self.hyper_api.generate_sbsd_data(
             SbsdInput(
-                index=index,
                 user_agent=USER_AGENT,
                 uuid=self.sbsd_info.uuid,
                 page_url=self.config.target_url,
                 o_cookie=o_cookie,
                 # script and context are mutually exclusive
-                script=self.sbsd_script if not self.sbsd_context else "",
+                script=self.sbsd_script if not context else "",
                 accept_language=self.config.accept_language,
                 ip=self.ip,
-                context=self.sbsd_context,
+                context=context,
+                # The absolute src of the SBSD script tag, query included
+                script_url=self.sbsd_script_url,
             )
         )
 
         # Store context for subsequent requests
-        self.sbsd_context = sbsd_context
+        self.sbsd_context = result.context
+        self.hints.update(result.client_hints)
+        payload = result.payload
 
         post_url = self.sbsd_info.post_url(self.config.target_url)
 
@@ -374,7 +466,7 @@ class AkamaiSolver:
         parsed = urlparse(self.config.target_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua": SEC_CH_UA,
             "content-type": "application/json",
             "sec-ch-ua-mobile": "?0",
@@ -389,16 +481,16 @@ class AkamaiSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=1, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "content-length", "sec-ch-ua", "content-type", "sec-ch-ua-mobile",
             "user-agent", "sec-ch-ua-platform", "accept", "origin",
             "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language", "cookie", "priority",
-        ])
+        ]
 
-        await self.client.post(
+        await self._send("POST",
             post_url,
             headers=headers,
             orig_headers=header_order,
@@ -419,7 +511,7 @@ class AkamaiSolver:
 
     async def _fetch_sensor_script(self) -> None:
         """Retrieves the Akamai sensor script content."""
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
             "user-agent": USER_AGENT,
@@ -432,15 +524,15 @@ class AkamaiSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=1",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "sec-ch-ua", "sec-ch-ua-mobile", "user-agent", "sec-ch-ua-platform",
             "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
             "referer", "accept-encoding", "accept-language", "cookie", "priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.sensor_endpoint,
             headers=headers,
             orig_headers=header_order,
@@ -450,7 +542,7 @@ class AkamaiSolver:
 
     async def _post_sensor(self, iteration: int) -> None:
         """Submits sensor data to the Akamai endpoint."""
-        sensor_data, sensor_context = await self.hyper_api.generate_sensor_data(
+        result = await self.hyper_api.generate_sensor_data(
             SensorInput(
                 abck=self._get_cookie("_abck"),
                 bmsz=self._get_cookie("bm_sz"),
@@ -466,7 +558,9 @@ class AkamaiSolver:
         )
 
         # Store context for subsequent requests
-        self.sensor_context = sensor_context
+        self.sensor_context = result.context
+        self.hints.update(result.client_hints)
+        sensor_data = result.payload
 
         # Wrap sensor data in JSON
         body_json = json.dumps({"sensor_data": sensor_data})
@@ -474,7 +568,7 @@ class AkamaiSolver:
         parsed = urlparse(self.config.target_url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "sec-ch-ua-mobile": "?0",
@@ -489,16 +583,16 @@ class AkamaiSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=1, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "content-length", "sec-ch-ua", "sec-ch-ua-platform", "sec-ch-ua-mobile",
             "user-agent", "content-type", "accept", "origin",
             "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language", "cookie", "priority",
-        ])
+        ]
 
-        await self.client.post(
+        await self._send("POST",
             self.sensor_endpoint,
             headers=headers,
             orig_headers=header_order,

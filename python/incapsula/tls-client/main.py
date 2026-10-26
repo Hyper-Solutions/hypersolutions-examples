@@ -17,7 +17,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import tls_client
@@ -89,6 +89,69 @@ SEC_CH_UA_PLATFORM = '"Windows"'
 
 
 # =============================================================================
+# CLIENT HINTS
+# =============================================================================
+
+# Chrome sends these client hints on every request; any other hint only goes
+# out once the site has asked for it in its Accept-CH response header.
+LOW_ENTROPY_HINTS = ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform")
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _insert_after_sec_ch(names: List[str], extra: List[str]) -> List[str]:
+    """Inserts extra right after the last sec-ch-* name (at the end when there is none)."""
+    present = {name.lower() for name in names}
+    extra = [name for name in extra if name not in present]
+    last = max((i for i, name in enumerate(names) if name.lower().startswith("sec-ch-")), default=len(names) - 1)
+    return names[:last + 1] + extra + names[last + 1:]
+
+
+class ClientHints:
+    """Forwards the client_hints a generate call returned the way Chrome does.
+
+    Until a generate call returns hints, the hardcoded SEC_CH_UA values above
+    go out. Accept-CH is recorded per origin from the responses.
+    """
+
+    def __init__(self) -> None:
+        self.hints: Dict[str, str] = {}
+        self.accept_ch: Dict[str, Set[str]] = {}
+
+    def update(self, hints: Optional[Dict[str, str]]) -> None:
+        """Stores the client_hints of a generate result (None when the API returned none)."""
+        if hints:
+            self.hints = dict(hints)
+
+    def record(self, url: str, accept_ch) -> None:
+        """Records the hints an origin asked for in its Accept-CH response header."""
+        if not accept_ch:
+            return
+        if isinstance(accept_ch, bytes):
+            accept_ch = accept_ch.decode()
+        self.accept_ch[_origin(url)] = {name.strip().lower() for name in accept_ch.split(",") if name.strip()}
+
+    def apply(self, url: str, headers: Dict[str, str], order: List[str]) -> Tuple[Dict[str, str], List[str]]:
+        """Returns headers and header order with the hints for url: the low-entropy
+        three replace the defaults, the others the origin asked for go right after
+        the last sec-ch-* header."""
+        out = {
+            name: self.hints.get(name.lower(), value) if name.lower() in LOW_ENTROPY_HINTS else value
+            for name, value in headers.items()
+        }
+        if not any(name.lower().startswith("sec-ch-") for name in out):
+            return out, list(order)
+
+        requested = self.accept_ch.get(_origin(url), set())
+        extra = [name for name in self.hints if name not in LOW_ENTROPY_HINTS and name in requested]
+        keys = _insert_after_sec_ch(list(out), extra)
+        return {name: out[name] if name in out else self.hints[name] for name in keys}, _insert_after_sec_ch(list(order), extra)
+
+
+# =============================================================================
 # INCAPSULA REESE84 SOLVER
 # =============================================================================
 
@@ -122,6 +185,9 @@ class Reese84Solver:
 
         # Create Hyper Solutions API session
         self.hyper_api = HyperSession(config.api_key)
+
+        # Client hints from the latest generate call, forwarded like Chrome
+        self.hints = ClientHints()
 
         # Internal state
         self.ip: str = ""
@@ -174,6 +240,16 @@ class Reese84Solver:
         resp = self.session.get("https://api.ipify.org")
         return resp.text.strip()
 
+    def _send(self, method: str, url: str, **kwargs):
+        """Sends a request with the headers set on the session plus the client
+        hints for url, and records the Accept-CH the response carries."""
+        self.session.headers, self.session.header_order = self.hints.apply(
+            url, dict(self.session.headers), list(self.session.header_order)
+        )
+        resp = self.session.execute_request(method, url, **kwargs)
+        self.hints.record(url, resp.headers.get("accept-ch"))
+        return resp
+
     def _make_initial_request(self) -> None:
         """Makes the first request to the target page to trigger Incapsula."""
         headers = {
@@ -200,7 +276,7 @@ class Reese84Solver:
             "sec-fetch-dest", "accept-encoding", "accept-language", "priority",
         ]
 
-        resp = self.session.get(self.config.target_url)
+        resp = self._send("GET", self.config.target_url)
         body = resp.text
 
         # Check for Incapsula challenge page
@@ -253,7 +329,7 @@ class Reese84Solver:
             "referer", "accept-encoding", "accept-language",
         ]
 
-        resp = self.session.get(script_url)
+        resp = self._send("GET", script_url)
         self.script = resp.text
         print(f"  Script fetched: {len(self.script)} bytes")
 
@@ -294,7 +370,7 @@ class Reese84Solver:
             "referer", "accept-encoding", "accept-language", "priority",
         ]
 
-        resp = self.session.post(pow_url, data=pow_body)
+        resp = self._send("POST", pow_url, data=pow_body)
 
         # Response is a JSON string
         return resp.json()
@@ -304,7 +380,7 @@ class Reese84Solver:
         parsed = urlparse(self.config.target_url)
         script_url = f"{parsed.scheme}://{parsed.netloc}{self.full_path}"
 
-        sensor = self.hyper_api.generate_reese84_sensor(
+        result = self.hyper_api.generate_reese84_sensor(
             ReeseInput(
                 user_agent=USER_AGENT,
                 accept_language=self.config.accept_language,
@@ -316,7 +392,8 @@ class Reese84Solver:
             )
         )
 
-        return sensor
+        self.hints.update(result.client_hints)
+        return result.payload
 
     def _submit_sensor(self, sensor: str) -> None:
         """Posts the generated sensor to the Incapsula endpoint."""
@@ -349,7 +426,7 @@ class Reese84Solver:
             "accept-encoding", "accept-language", "cookie", "priority",
         ]
 
-        resp = self.session.post(sensor_url, data=sensor)
+        resp = self._send("POST", sensor_url, data=sensor)
 
         # Parse response to get the token
         result = resp.json()
@@ -399,7 +476,7 @@ class Reese84Solver:
             "accept-language", "cookie", "priority",
         ]
 
-        resp = self.session.get(self.config.target_url)
+        resp = self._send("GET", self.config.target_url)
         body = resp.text
 
         # Check if we're still seeing the challenge page
