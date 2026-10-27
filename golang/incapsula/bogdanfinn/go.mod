@@ -3,7 +3,7 @@ module incapsula-example
 go 1.25.5
 
 require (
-	github.com/Hyper-Solutions/hyper-sdk-go/v4 v4.0.0
+	github.com/Hyper-Solutions/hyper-sdk-go/v4 v4.1.0
 	github.com/bogdanfinn/fhttp v0.6.9
 	github.com/bogdanfinn/tls-client v1.16.0
 )

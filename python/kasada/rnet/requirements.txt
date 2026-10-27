@@ -1,3 +1,3 @@
 rnet>=3.0.0rc17
 asyncio
-hyper-sdk @ git+https://github.com/Hyper-Solutions/hyper-sdk-py@2fe9678
+hyper-sdk>=4.1.0
