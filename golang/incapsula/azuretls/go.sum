@@ -1,3 +1,5 @@
+github.com/Hyper-Solutions/hyper-sdk-go/v4 v4.0.0 h1:yMyov1bf1XfIirMh/sbiQFSq2f+0xQOpOwClHz8Q5mA=
+github.com/Hyper-Solutions/hyper-sdk-go/v4 v4.0.0/go.mod h1:j8eZgqipX0ii9+4qE596YNK6kkYvgZ9r32liFa3V/68=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=
 github.com/Masterminds/semver/v3 v3.4.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/Noooste/azuretls-client v1.13.2 h1:8Dli5aKP5O6qN/FNSGFVkpQ1V1F1gGawAkLIE2Nrk+U=
