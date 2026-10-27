@@ -4,6 +4,7 @@
 // This example demonstrates:
 //   - Setting up a TLS client with proper browser fingerprinting
 //   - Detecting Kasada protection (429 on page vs /fp endpoint)
+//   - Reading the x-kpsdk-v version from the site's p.js
 //   - Fetching and solving ips.js challenges
 //   - Generating payload data (CT) and POW tokens (CD)
 //   - Handling BotID verification when required
@@ -98,9 +99,6 @@ const (
 	// SecChUaPlatform is the sec-ch-ua-platform header value.
 	SecChUaPlatform = `"Windows"`
 
-	// KasadaVersion is the Kasada SDK version.
-	KasadaVersion = "j-1.1.29140"
-
 	// Fixed Kasada paths
 	KasadaBasePath = "/149e9513-01fa-4fb0-aad4-566afd725d1b/2d206a39-8ed7-437e-a3be-862e0f06eea3"
 )
@@ -153,6 +151,7 @@ type KasadaSolver struct {
 
 	// Internal state
 	ip        string
+	version   string // x-kpsdk-v, read from p.js
 	ipsScript string
 	ipsLink   string
 
@@ -219,6 +218,11 @@ func (s *KasadaSolver) Solve(ctx context.Context) (bool, error) {
 	statusCode, pageBody, err := s.fetchPage(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to fetch page: %w", err)
+	}
+
+	// Read the x-kpsdk-v value from the site's p.js, used on /fp and the protected requests
+	if err := s.fetchVersion(ctx); err != nil {
+		return false, fmt.Errorf("failed to get Kasada version: %w", err)
 	}
 
 	if statusCode == 429 {
@@ -316,6 +320,65 @@ func (s *KasadaSolver) fetchPage(ctx context.Context) (int, []byte, error) {
 	return resp.StatusCode, body, nil
 }
 
+// fetchVersion retrieves p.js and reads its x-kpsdk-v value with the Hyper API.
+func (s *KasadaSolver) fetchVersion(ctx context.Context) error {
+	pjsURL := fmt.Sprintf("%s%s/p.js", s.baseURL, KasadaBasePath)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", pjsURL, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header = http.Header{
+		"sec-ch-ua-platform": {SecChUaPlatform},
+		"user-agent":         {UserAgent},
+		"sec-ch-ua":          {SecChUa},
+		"sec-ch-ua-mobile":   {"?0"},
+		"accept":             {"*/*"},
+		"sec-fetch-site":     {"same-origin"},
+		"sec-fetch-mode":     {"no-cors"},
+		"sec-fetch-dest":     {"script"},
+		"referer":            {s.config.PageURL},
+		"accept-encoding":    {"gzip, deflate, br, zstd"},
+		"accept-language":    {s.config.AcceptLanguage},
+		"priority":           {"u=1"},
+		http.HeaderOrderKey: {
+			"sec-ch-ua-platform", "user-agent", "sec-ch-ua", "sec-ch-ua-mobile",
+			"accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+			"referer", "accept-encoding", "accept-language", "cookie", "priority",
+		},
+	}
+	s.hints.apply(req.Header)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("p.js request returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	res, err := s.hyperAPI.GetKasadaVersion(ctx, &hyper.KasadaVersionInput{
+		PageUrl: s.config.PageURL,
+		Script:  string(body),
+	})
+	if err != nil {
+		return fmt.Errorf("Hyper API error: %w", err)
+	}
+
+	s.version = res.Version
+	log.Printf("  Kasada version (x-kpsdk-v): %s", s.version)
+
+	return nil
+}
+
 // solveFromBlockPage handles the flow when page returns 429.
 func (s *KasadaSolver) solveFromBlockPage(ctx context.Context, blockPageBody []byte) error {
 	// Extract ips.js URL from block page
@@ -339,7 +402,7 @@ func (s *KasadaSolver) solveFromBlockPage(ctx context.Context, blockPageBody []b
 // solveFromFpEndpoint handles the flow when page doesn't return 429.
 func (s *KasadaSolver) solveFromFpEndpoint(ctx context.Context) error {
 	// Request /fp endpoint to trigger 429
-	fpURL := fmt.Sprintf("%s%s/fp?x-kpsdk-v=%s", s.baseURL, KasadaBasePath, KasadaVersion)
+	fpURL := fmt.Sprintf("%s%s/fp?x-kpsdk-v=%s", s.baseURL, KasadaBasePath, s.version)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fpURL, nil)
 	if err != nil {
@@ -662,7 +725,7 @@ func (s *KasadaSolver) generatePow(ctx context.Context) error {
 		"x-kpsdk-h":          {"01"},
 		"sec-ch-ua":          {SecChUa},
 		"sec-ch-ua-mobile":   {"?0"},
-		"x-kpsdk-v":          {KasadaVersion},
+		"x-kpsdk-v":          {s.version},
 		"user-agent":         {UserAgent},
 		"accept":             {"*/*"},
 		"sec-fetch-site":     {"same-origin"},
@@ -717,7 +780,7 @@ func (s *KasadaSolver) generatePow(ctx context.Context) error {
 	log.Printf("    x-kpsdk-ct: %s", s.tlHeaders.Ct)
 	log.Printf("    x-kpsdk-cd: %s", pow.Payload)
 	log.Printf("    x-kpsdk-h:  %s", s.mfcHeaders.H)
-	log.Printf("    x-kpsdk-v:  %s", KasadaVersion)
+	log.Printf("    x-kpsdk-v:  %s", s.version)
 
 	return nil
 }

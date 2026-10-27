@@ -3,7 +3,7 @@ module kasada-example
 go 1.25.5
 
 require (
-	github.com/Hyper-Solutions/hyper-sdk-go/v4 v4.0.0
+	github.com/Hyper-Solutions/hyper-sdk-go/v4 v4.0.1-0.20261027140153-b1ded54bc4a4
 	github.com/bogdanfinn/fhttp v0.6.6
 	github.com/bogdanfinn/tls-client v1.13.1
 )
