@@ -18,7 +18,7 @@ import base64
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from rnet import Client, Proxy, HeaderMap, OrigHeaderMap, Jar, Cookie
@@ -108,6 +108,69 @@ SEC_CH_UA_PLATFORM = '"Windows"'
 
 
 # =============================================================================
+# CLIENT HINTS
+# =============================================================================
+
+# Chrome sends these client hints on every request; any other hint only goes
+# out once the site has asked for it in its Accept-CH response header.
+LOW_ENTROPY_HINTS = ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform")
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _insert_after_sec_ch(names: List[str], extra: List[str]) -> List[str]:
+    """Inserts extra right after the last sec-ch-* name (at the end when there is none)."""
+    present = {name.lower() for name in names}
+    extra = [name for name in extra if name not in present]
+    last = max((i for i, name in enumerate(names) if name.lower().startswith("sec-ch-")), default=len(names) - 1)
+    return names[:last + 1] + extra + names[last + 1:]
+
+
+class ClientHints:
+    """Forwards the client_hints a generate call returned the way Chrome does.
+
+    Until a generate call returns hints, the hardcoded SEC_CH_UA values above
+    go out. Accept-CH is recorded per origin from the responses.
+    """
+
+    def __init__(self) -> None:
+        self.hints: Dict[str, str] = {}
+        self.accept_ch: Dict[str, Set[str]] = {}
+
+    def update(self, hints: Optional[Dict[str, str]]) -> None:
+        """Stores the client_hints of a generate result (None when the API returned none)."""
+        if hints:
+            self.hints = dict(hints)
+
+    def record(self, url: str, accept_ch) -> None:
+        """Records the hints an origin asked for in its Accept-CH response header."""
+        if not accept_ch:
+            return
+        if isinstance(accept_ch, bytes):
+            accept_ch = accept_ch.decode()
+        self.accept_ch[_origin(url)] = {name.strip().lower() for name in accept_ch.split(",") if name.strip()}
+
+    def apply(self, url: str, headers: Dict[str, str], order: List[str]) -> Tuple[Dict[str, str], List[str]]:
+        """Returns headers and header order with the hints for url: the low-entropy
+        three replace the defaults, the others the origin asked for go right after
+        the last sec-ch-* header."""
+        out = {
+            name: self.hints.get(name.lower(), value) if name.lower() in LOW_ENTROPY_HINTS else value
+            for name, value in headers.items()
+        }
+        if not any(name.lower().startswith("sec-ch-") for name in out):
+            return out, list(order)
+
+        requested = self.accept_ch.get(_origin(url), set())
+        extra = [name for name in self.hints if name not in LOW_ENTROPY_HINTS and name in requested]
+        keys = _insert_after_sec_ch(list(out), extra)
+        return {name: out[name] if name in out else self.hints[name] for name in keys}, _insert_after_sec_ch(list(order), extra)
+
+
+# =============================================================================
 # DATADOME SOLVER
 # =============================================================================
 
@@ -151,6 +214,9 @@ class DataDomeSolver:
 
         # Create Hyper Solutions API session (async)
         self.hyper_api = HyperSession(config.api_key)
+
+        # Client hints from the latest generate call, forwarded like Chrome
+        self.hints = ClientHints()
 
         # Internal state
         self.ip: str = ""
@@ -206,6 +272,20 @@ class DataDomeSolver:
         resp = await self.client.get("https://api.ipify.org")
         text = await resp.text()
         return text.strip()
+
+    async def _send(self, method: str, url: str, headers: dict, orig_headers: list, **kwargs):
+        """Sends a request with the client hints for url added to headers, and
+        records the Accept-CH the response carries."""
+        headers, orig_headers = self.hints.apply(url, headers, orig_headers)
+        send = self.client.get if method == "GET" else self.client.post
+        resp = await send(
+            url,
+            headers=self._build_headers(headers),
+            orig_headers=self._build_header_order(orig_headers),
+            **kwargs,
+        )
+        self.hints.record(url, resp.headers.get("accept-ch"))
+        return resp
 
     def _build_headers(self, header_dict: dict) -> HeaderMap:
         """Build a HeaderMap from a dictionary."""
@@ -272,7 +352,7 @@ class DataDomeSolver:
 
     async def _make_initial_request(self) -> None:
         """Makes the first request to the target page to trigger DataDome."""
-        headers = self._build_headers({
+        headers = {
             "connection": "keep-alive",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
@@ -286,15 +366,15 @@ class DataDomeSolver:
             "sec-fetch-dest": "document",
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "host", "connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "upgrade-insecure-requests", "user-agent", "accept", "sec-fetch-site",
             "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest", "accept-encoding", "accept-language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.config.target_url,
             headers=headers,
             orig_headers=header_order,
@@ -331,7 +411,7 @@ class DataDomeSolver:
 
     async def _reload_page(self) -> None:
         """Reloads the target page after solving a challenge."""
-        headers = self._build_headers({
+        headers = {
             "connection": "keep-alive",
             "cache-control": "max-age=0",
             "sec-ch-ua": SEC_CH_UA,
@@ -347,16 +427,16 @@ class DataDomeSolver:
             "referer": self.config.target_url,
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "host", "connection", "cache-control", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "upgrade-insecure-requests", "user-agent", "accept", "sec-fetch-site",
             "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.config.target_url,
             headers=headers,
             orig_headers=header_order,
@@ -415,7 +495,8 @@ class DataDomeSolver:
                 accept_language=self.config.accept_language,
             )
         )
-        payload = result["payload"]
+        self.hints.update(result.client_hints)
+        payload = result.payload
 
         # Step 2d: Submit the interstitial payload
         print("  Submitting interstitial solution...")
@@ -423,7 +504,7 @@ class DataDomeSolver:
 
     async def _fetch_interstitial_page(self) -> None:
         """Retrieves the interstitial challenge HTML."""
-        headers = self._build_headers({
+        headers = {
             "Connection": "keep-alive",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
@@ -438,16 +519,16 @@ class DataDomeSolver:
             "Referer": self.config.referer,
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "Host", "Connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "Upgrade-Insecure-Requests", "User-Agent", "Accept", "Sec-Fetch-Site",
             "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-Storage-Access", "Referer",
             "Accept-Encoding", "Accept-Language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.device_check_link,
             headers=headers,
             orig_headers=header_order,
@@ -472,7 +553,7 @@ class DataDomeSolver:
 
         print(f"  Fetching challenge script: {script_url}")
 
-        headers = self._build_headers({
+        headers = {
             "Connection": "keep-alive",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
@@ -485,15 +566,15 @@ class DataDomeSolver:
             "Referer": self.device_check_link,
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "Host", "Connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "User-Agent", "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
             "Referer", "Accept-Encoding", "Accept-Language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             script_url,
             headers=headers,
             orig_headers=header_order,
@@ -506,7 +587,7 @@ class DataDomeSolver:
 
     async def _submit_interstitial(self, payload: str) -> None:
         """Posts the generated payload to solve the interstitial."""
-        headers = self._build_headers({
+        headers = {
             "Connection": "keep-alive",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "User-Agent": USER_AGENT,
@@ -522,16 +603,16 @@ class DataDomeSolver:
             "Referer": self.device_check_link,
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "Host", "Connection", "Content-Length", "sec-ch-ua-platform", "User-Agent",
             "sec-ch-ua", "Content-Type", "sec-ch-ua-mobile", "Accept", "Origin",
             "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-Storage-Access",
             "Referer", "Accept-Encoding", "Accept-Language",
-        ])
+        ]
 
-        resp = await self.client.post(
+        resp = await self._send("POST",
             "https://geo.captcha-delivery.com/interstitial/",
             headers=headers,
             orig_headers=header_order,
@@ -581,7 +662,8 @@ class DataDomeSolver:
                 parent_url=""
             )
         )
-        check_url = result["payload"]
+        self.hints.update(result.client_hints)
+        check_url = result.payload
 
         # Step 3e: Submit the slider solution
         print("  Submitting slider solution...")
@@ -589,7 +671,7 @@ class DataDomeSolver:
 
     async def _fetch_captcha_page(self) -> None:
         """Retrieves the slider captcha HTML."""
-        headers = self._build_headers({
+        headers = {
             "connection": "keep-alive",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
@@ -604,16 +686,16 @@ class DataDomeSolver:
             "referer": self.config.referer,
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "host", "connection", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "upgrade-insecure-requests", "user-agent", "accept", "sec-fetch-site",
             "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-storage-access", "referer",
             "accept-encoding", "accept-language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.device_check_link,
             headers=headers,
             orig_headers=header_order,
@@ -631,7 +713,7 @@ class DataDomeSolver:
 
     async def _download_puzzle_image(self) -> str:
         """Downloads the main puzzle background image and returns as string."""
-        headers = self._build_headers({
+        headers = {
             "origin": "https://geo.captcha-delivery.com",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "user-agent": USER_AGENT,
@@ -645,15 +727,15 @@ class DataDomeSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "origin", "sec-ch-ua-platform", "user-agent", "sec-ch-ua", "sec-ch-ua-mobile",
             "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language", "priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.captcha_path,
             headers=headers,
             orig_headers=header_order,
@@ -667,7 +749,7 @@ class DataDomeSolver:
         # The piece image URL is derived from the puzzle URL by replacing .jpg with .frag.png
         piece_url = self.captcha_path.replace(".jpg", ".frag.png")
 
-        headers = self._build_headers({
+        headers = {
             "origin": "https://geo.captcha-delivery.com",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "user-agent": USER_AGENT,
@@ -681,15 +763,15 @@ class DataDomeSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "origin", "sec-ch-ua-platform", "user-agent", "sec-ch-ua", "sec-ch-ua-mobile",
             "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language", "priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             piece_url,
             headers=headers,
             orig_headers=header_order,
@@ -700,7 +782,7 @@ class DataDomeSolver:
 
     async def _submit_slider_solution(self, check_url: str) -> None:
         """Submits the generated slider solution."""
-        headers = self._build_headers({
+        headers = {
             "connection": "keep-alive",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "user-agent": USER_AGENT,
@@ -715,16 +797,16 @@ class DataDomeSolver:
             "referer": self.device_check_link,
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "host", "connection", "sec-ch-ua-platform", "user-agent", "sec-ch-ua",
             "content-type", "sec-ch-ua-mobile", "accept", "sec-fetch-site",
             "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-storage-access", "referer",
             "accept-encoding", "accept-language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             check_url,
             headers=headers,
             orig_headers=header_order,
@@ -757,7 +839,7 @@ class DataDomeSolver:
         # First tags request: "ch" (challenge) type
         # ==========================================================================
         print("  Sending first tags request (type: ch)...")
-        ch_payload = await self.hyper_api.generate_tags_payload(
+        ch_result = await self.hyper_api.generate_tags_payload(
             DataDomeTagsInput(
                 user_agent=USER_AGENT,
                 cid=cid,
@@ -770,7 +852,8 @@ class DataDomeSolver:
             )
         )
 
-        await self._post_tags(ch_payload)
+        self.hints.update(ch_result.client_hints)
+        await self._post_tags(ch_result.payload)
 
         # ==========================================================================
         # Sleep between requests to simulate real user behavior
@@ -785,7 +868,7 @@ class DataDomeSolver:
         cid = self._get_datadome_cookie()
 
         print("  Sending second tags request (type: le)...")
-        le_payload = await self.hyper_api.generate_tags_payload(
+        le_result = await self.hyper_api.generate_tags_payload(
             DataDomeTagsInput(
                 user_agent=USER_AGENT,
                 cid=cid,
@@ -798,7 +881,8 @@ class DataDomeSolver:
             )
         )
 
-        await self._post_tags(le_payload)
+        self.hints.update(le_result.client_hints)
+        await self._post_tags(le_result.payload)
 
         print("  Tags solved successfully!")
 
@@ -808,7 +892,7 @@ class DataDomeSolver:
         parsed = urlparse(self.config.referer)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua": SEC_CH_UA,
             "content-type": "application/x-www-form-urlencoded",
             "sec-ch-ua-mobile": "?0",
@@ -823,16 +907,16 @@ class DataDomeSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=1, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "content-length", "sec-ch-ua", "content-type", "sec-ch-ua-mobile",
             "user-agent", "sec-ch-ua-platform", "accept", "origin",
             "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language", "priority",
-        ])
+        ]
 
-        resp = await self.client.post(
+        resp = await self._send("POST",
             self.config.tags_endpoint,
             headers=headers,
             orig_headers=header_order,
@@ -849,7 +933,7 @@ class DataDomeSolver:
 
     async def _verify_access(self) -> bool:
         """Makes a final request to verify we can access the protected page."""
-        headers = self._build_headers({
+        headers = {
             "cache-control": "max-age=0",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
@@ -865,16 +949,16 @@ class DataDomeSolver:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": self.config.accept_language,
             "priority": "u=0, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "host", "cache-control", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "upgrade-insecure-requests", "user-agent", "accept", "sec-fetch-site",
             "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest", "referer",
             "accept-encoding", "accept-language", "cookie", "priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.config.target_url,
             headers=headers,
             orig_headers=header_order,

@@ -3,6 +3,7 @@
  *
  * This example demonstrates:
  *   - Setting up a TLS client session with Chrome browser impersonation
+ *   - Forwarding the client hints the Hyper API returns, as Chrome does (Accept-CH aware)
  *   - Detecting Kasada protection (429 on page vs /fp endpoint)
  *   - Fetching and solving ips.js challenges
  *   - Generating payload data (CT) and POW tokens (CD)
@@ -70,6 +71,101 @@ const SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v=
 // sec-ch-ua-platform header value
 const SEC_CH_UA_PLATFORM = '"Windows"';
 
+// =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// Client hints Chrome sends on every request. The others (sec-ch-ua-arch,
+// sec-ch-ua-full-version-list, device-memory, ...) only go to an origin whose
+// Accept-CH response header asked for them.
+const DEFAULT_CLIENT_HINTS = ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform'];
+
+/**
+ * Reads a response header case-insensitively. The TLS client can return
+ * canonical-case names and array values.
+ * @param {{headers?: Object}} response
+ * @param {string} name
+ * @returns {string}
+ */
+function getResponseHeader(response, name) {
+    const headers = response?.headers || {};
+    const key = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+    if (key === undefined) {
+        return '';
+    }
+    const value = headers[key];
+    return Array.isArray(value) ? value.join(', ') : String(value);
+}
+
+/**
+ * Forwards the client hints the Hyper API returns the way Chrome sends them.
+ */
+class ClientHints {
+    constructor() {
+        /** @type {Record<string, string>|null} Hints from the last generate call that returned them */
+        this.hints = null;
+        /** @type {Map<string, Set<string>>} Accept-CH hint names per origin */
+        this.acceptCh = new Map();
+    }
+
+    /**
+     * Stores the clientHints of a generate result. Results without hints keep
+     * the previous ones.
+     * @param {Record<string, string>|undefined} hints
+     */
+    update(hints) {
+        if (hints) {
+            this.hints = hints;
+        }
+    }
+
+    /**
+     * Records the Accept-CH header of a document response for its origin.
+     * @param {string} url
+     * @param {Object} response
+     */
+    recordAcceptCh(url, response) {
+        const value = getResponseHeader(response, 'accept-ch');
+        if (value) {
+            const names = value.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+            this.acceptCh.set(new URL(url).origin, new Set(names));
+        }
+    }
+
+    /**
+     * Sets the hints on a request: sec-ch-ua, sec-ch-ua-mobile and
+     * sec-ch-ua-platform always, every other hint only when the request's
+     * origin listed it in Accept-CH. Extra hints are ordered right after the
+     * last sec-ch-* header. Before the first generate call the hardcoded
+     * values stay.
+     * @param {string} url
+     * @param {Record<string, string>} headers
+     * @param {string[]} headerOrder
+     */
+    apply(url, headers, headerOrder) {
+        if (!this.hints) {
+            return;
+        }
+        const allowed = this.acceptCh.get(new URL(url).origin) || new Set();
+        const extra = [];
+        for (const [name, value] of Object.entries(this.hints)) {
+            if (DEFAULT_CLIENT_HINTS.includes(name) || allowed.has(name)) {
+                headers[name] = value;
+                if (!headerOrder.includes(name)) {
+                    extra.push(name);
+                }
+            }
+        }
+        let at = -1;
+        headerOrder.forEach((name, i) => {
+            if (name.startsWith('sec-ch-')) {
+                at = i;
+            }
+        });
+        headerOrder.splice(at + 1, 0, ...extra);
+    }
+}
+
 // Kasada SDK version
 const KASADA_VERSION = 'j-1.1.29140';
 
@@ -124,6 +220,9 @@ class KasadaSolver {
 
         // Create Hyper Solutions API session
         this.hyperApi = new HyperSession(config.apiKey);
+
+        // Client hints from the Hyper API and the Accept-CH each origin asked for
+        this.clientHints = new ClientHints();
 
         // Internal state
         this.ip = '';
@@ -237,11 +336,13 @@ class KasadaSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.config.pageUrl, headers, headerOrder);
         const response = await this.session.get(this.config.pageUrl, {
             headers,
             headerOrder,
         });
 
+        this.clientHints.recordAcceptCh(this.config.pageUrl, response);
         console.log(`  Page response: ${response.status}`);
 
         return { statusCode: response.status, body: response.body };
@@ -306,6 +407,7 @@ class KasadaSolver {
             'priority',
         ];
 
+        this.clientHints.apply(fpUrl, headers, headerOrder);
         const response = await this.session.get(fpUrl, {
             headers,
             headerOrder,
@@ -365,6 +467,7 @@ class KasadaSolver {
             'priority',
         ];
 
+        this.clientHints.apply(this.ipsLink, headers, headerOrder);
         const response = await this.session.get(this.ipsLink, {
             headers,
             headerOrder,
@@ -394,12 +497,16 @@ class KasadaSolver {
                 this.ipsScript,
                 this.ip,
                 this.config.acceptLanguage,
+                // strict: the API refuses with an error instead of returning a payload when the script has a signal it cannot identify yet
+                true,
             )
         );
 
         // Decode base64 payload
         const payloadB64 = result.payload;
+        // x-kpsdk-* headers for the /tl POST; the client hints come separately
         const headersDict = result.headers;
+        this.clientHints.update(result.clientHints);
 
         console.log('  Submitting payload to /tl...');
 
@@ -474,6 +581,7 @@ class KasadaSolver {
             'priority'
         );
 
+        this.clientHints.apply(tlUrl, headers, headerOrder);
         const response = await this.session.post(tlUrl, payloadB64, {
             headers,
             headerOrder,
@@ -493,9 +601,8 @@ class KasadaSolver {
         console.log('  /tl returned reload:true - challenge solved!');
 
         // Store headers for POW generation
-        // Note: Response headers access may vary depending on tlsclientwrapper implementation
-        this.tlCt = response.headers?.['x-kpsdk-ct'] || '';
-        const stStr = response.headers?.['x-kpsdk-st'] || '';
+        this.tlCt = getResponseHeader(response, 'x-kpsdk-ct');
+        const stStr = getResponseHeader(response, 'x-kpsdk-st');
         if (stStr) {
             this.tlSt = parseInt(stStr, 10);
         }
@@ -543,6 +650,7 @@ class KasadaSolver {
             'cookie',
         ];
 
+        this.clientHints.apply(botIdUrl, headers, headerOrder);
         const response = await this.session.get(botIdUrl, {
             headers,
             headerOrder,
@@ -555,7 +663,7 @@ class KasadaSolver {
         console.log(`  BotID script fetched: ${response.body.length} bytes`);
 
         // Generate BotID header
-        const isHumanHeader = await generateBotIDHeader(
+        const botId = await generateBotIDHeader(
             this.hyperApi,
             new BotIDHeaderInput(
                 response.body,
@@ -565,7 +673,7 @@ class KasadaSolver {
             )
         );
 
-        console.log(`  x-is-human header generated: ${isHumanHeader.substring(0, 50)}...`);
+        console.log(`  x-is-human header generated: ${botId.payload.substring(0, 50)}...`);
     }
 
     /**
@@ -613,14 +721,14 @@ class KasadaSolver {
             'priority',
         ];
 
+        this.clientHints.apply(mfcUrl, headers, headerOrder);
         const response = await this.session.get(mfcUrl, {
             headers,
             headerOrder,
         });
 
-        // Note: Response headers access may vary depending on tlsclientwrapper implementation
-        this.mfcFc = response.headers?.['x-kpsdk-fc'] || '';
-        this.mfcH = response.headers?.['x-kpsdk-h'] || '';
+        this.mfcFc = getResponseHeader(response, 'x-kpsdk-fc');
+        this.mfcH = getResponseHeader(response, 'x-kpsdk-h');
 
         console.log(
             `  /mfc headers - x-kpsdk-fc: ${this.mfcFc.substring(0, 30)}..., x-kpsdk-h: ${this.mfcH}`
@@ -631,13 +739,13 @@ class KasadaSolver {
 
         const cd = await generateKasadaPow(
             this.hyperApi,
-            new KasadaPowInput(this.tlSt, this.tlCt, this.mfcFc, this.domain)
+            new KasadaPowInput(this.tlSt, this.tlCt, this.domain, this.mfcFc)
         );
 
         console.log('\n  ✅ POW generated successfully!');
         console.log('\n  Headers for protected API requests:');
         console.log(`    x-kpsdk-ct: ${this.tlCt}`);
-        console.log(`    x-kpsdk-cd: ${cd}`);
+        console.log(`    x-kpsdk-cd: ${cd.payload}`);
         console.log(`    x-kpsdk-h:  ${this.mfcH}`);
         console.log(`    x-kpsdk-v:  ${KASADA_VERSION}`);
     }

@@ -18,7 +18,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from rnet import Client, Proxy, HeaderMap, OrigHeaderMap, Jar, Cookie
@@ -91,6 +91,69 @@ SEC_CH_UA_PLATFORM = '"Windows"'
 
 
 # =============================================================================
+# CLIENT HINTS
+# =============================================================================
+
+# Chrome sends these client hints on every request; any other hint only goes
+# out once the site has asked for it in its Accept-CH response header.
+LOW_ENTROPY_HINTS = ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform")
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _insert_after_sec_ch(names: List[str], extra: List[str]) -> List[str]:
+    """Inserts extra right after the last sec-ch-* name (at the end when there is none)."""
+    present = {name.lower() for name in names}
+    extra = [name for name in extra if name not in present]
+    last = max((i for i, name in enumerate(names) if name.lower().startswith("sec-ch-")), default=len(names) - 1)
+    return names[:last + 1] + extra + names[last + 1:]
+
+
+class ClientHints:
+    """Forwards the client_hints a generate call returned the way Chrome does.
+
+    Until a generate call returns hints, the hardcoded SEC_CH_UA values above
+    go out. Accept-CH is recorded per origin from the responses.
+    """
+
+    def __init__(self) -> None:
+        self.hints: Dict[str, str] = {}
+        self.accept_ch: Dict[str, Set[str]] = {}
+
+    def update(self, hints: Optional[Dict[str, str]]) -> None:
+        """Stores the client_hints of a generate result (None when the API returned none)."""
+        if hints:
+            self.hints = dict(hints)
+
+    def record(self, url: str, accept_ch) -> None:
+        """Records the hints an origin asked for in its Accept-CH response header."""
+        if not accept_ch:
+            return
+        if isinstance(accept_ch, bytes):
+            accept_ch = accept_ch.decode()
+        self.accept_ch[_origin(url)] = {name.strip().lower() for name in accept_ch.split(",") if name.strip()}
+
+    def apply(self, url: str, headers: Dict[str, str], order: List[str]) -> Tuple[Dict[str, str], List[str]]:
+        """Returns headers and header order with the hints for url: the low-entropy
+        three replace the defaults, the others the origin asked for go right after
+        the last sec-ch-* header."""
+        out = {
+            name: self.hints.get(name.lower(), value) if name.lower() in LOW_ENTROPY_HINTS else value
+            for name, value in headers.items()
+        }
+        if not any(name.lower().startswith("sec-ch-") for name in out):
+            return out, list(order)
+
+        requested = self.accept_ch.get(_origin(url), set())
+        extra = [name for name in self.hints if name not in LOW_ENTROPY_HINTS and name in requested]
+        keys = _insert_after_sec_ch(list(out), extra)
+        return {name: out[name] if name in out else self.hints[name] for name in keys}, _insert_after_sec_ch(list(order), extra)
+
+
+# =============================================================================
 # INCAPSULA REESE84 SOLVER
 # =============================================================================
 
@@ -127,6 +190,9 @@ class Reese84Solver:
 
         # Create Hyper Solutions API session (async)
         self.hyper_api = HyperSession(config.api_key)
+
+        # Client hints from the latest generate call, forwarded like Chrome
+        self.hints = ClientHints()
 
         # Internal state
         self.ip: str = ""
@@ -180,6 +246,20 @@ class Reese84Solver:
         text = await resp.text()
         return text.strip()
 
+    async def _send(self, method: str, url: str, headers: dict, orig_headers: list, **kwargs):
+        """Sends a request with the client hints for url added to headers, and
+        records the Accept-CH the response carries."""
+        headers, orig_headers = self.hints.apply(url, headers, orig_headers)
+        send = self.client.get if method == "GET" else self.client.post
+        resp = await send(
+            url,
+            headers=self._build_headers(headers),
+            orig_headers=self._build_header_order(orig_headers),
+            **kwargs,
+        )
+        self.hints.record(url, resp.headers.get("accept-ch"))
+        return resp
+
     def _build_headers(self, header_dict: dict) -> HeaderMap:
         """Build a HeaderMap from a dictionary."""
         headers = HeaderMap()
@@ -227,7 +307,7 @@ class Reese84Solver:
 
     async def _make_initial_request(self) -> None:
         """Makes the first request to the target page to trigger Incapsula."""
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
@@ -241,16 +321,16 @@ class Reese84Solver:
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
             "Priority": "u=0, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "Upgrade-Insecure-Requests", "User-Agent", "Accept",
             "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-User",
             "Sec-Fetch-Dest", "Accept-Encoding", "Accept-Language", "Priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.config.target_url,
             headers=headers,
             orig_headers=header_order,
@@ -287,7 +367,7 @@ class Reese84Solver:
         parsed = urlparse(self.config.target_url)
         script_url = f"{parsed.scheme}://{parsed.netloc}{self.full_path}"
 
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "User-Agent": USER_AGENT,
             "sec-ch-ua": SEC_CH_UA,
@@ -299,15 +379,15 @@ class Reese84Solver:
             "Referer": self.config.referer,
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "sec-ch-ua-platform", "User-Agent", "sec-ch-ua", "sec-ch-ua-mobile",
             "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
             "Referer", "Accept-Encoding", "Accept-Language",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             script_url,
             headers=headers,
             orig_headers=header_order,
@@ -326,7 +406,7 @@ class Reese84Solver:
 
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        headers = self._build_headers({
+        headers = {
             "Pragma": "no-cache",
             "Cache-Control": "no-cache",
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
@@ -343,16 +423,16 @@ class Reese84Solver:
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
             "Priority": "u=1, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "Content-Length", "Pragma", "Cache-Control", "sec-ch-ua-platform",
             "User-Agent", "Accept", "sec-ch-ua", "Content-Type", "sec-ch-ua-mobile",
             "Origin", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
             "Referer", "Accept-Encoding", "Accept-Language", "Priority",
-        ])
+        ]
 
-        resp = await self.client.post(
+        resp = await self._send("POST",
             pow_url,
             headers=headers,
             orig_headers=header_order,
@@ -369,7 +449,7 @@ class Reese84Solver:
         parsed = urlparse(self.config.target_url)
         script_url = f"{parsed.scheme}://{parsed.netloc}{self.full_path}"
 
-        sensor = await self.hyper_api.generate_reese84_sensor(
+        result = await self.hyper_api.generate_reese84_sensor(
             ReeseInput(
                 user_agent=USER_AGENT,
                 accept_language=self.config.accept_language,
@@ -381,7 +461,8 @@ class Reese84Solver:
             )
         )
 
-        return sensor
+        self.hints.update(result.client_hints)
+        return result.payload
 
     async def _submit_sensor(self, sensor: str) -> None:
         """Posts the generated sensor to the Incapsula endpoint."""
@@ -389,7 +470,7 @@ class Reese84Solver:
         sensor_url = f"{parsed.scheme}://{parsed.netloc}{self.path}?d={parsed.netloc}"
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        headers = self._build_headers({
+        headers = {
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "User-Agent": USER_AGENT,
             "Accept": "application/json; charset=utf-8",
@@ -404,16 +485,16 @@ class Reese84Solver:
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
             "Priority": "u=1, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "Content-Length", "sec-ch-ua-platform", "User-Agent", "Accept",
             "sec-ch-ua", "Content-Type", "sec-ch-ua-mobile", "Origin",
             "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Referer",
             "Accept-Encoding", "Accept-Language", "Cookie", "Priority",
-        ])
+        ]
 
-        resp = await self.client.post(
+        resp = await self._send("POST",
             sensor_url,
             headers=headers,
             orig_headers=header_order,
@@ -437,7 +518,7 @@ class Reese84Solver:
 
     async def _verify_access(self) -> bool:
         """Makes a final request to verify we can access the protected page."""
-        headers = self._build_headers({
+        headers = {
             "Cache-Control": "max-age=0",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
@@ -452,16 +533,16 @@ class Reese84Solver:
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": self.config.accept_language,
             "Priority": "u=0, i",
-        })
+        }
 
-        header_order = self._build_header_order([
+        header_order = [
             "Cache-Control", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
             "Upgrade-Insecure-Requests", "User-Agent", "Accept", "Sec-Fetch-Site",
             "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Referer", "Accept-Encoding",
             "Accept-Language", "Cookie", "Priority",
-        ])
+        ]
 
-        resp = await self.client.get(
+        resp = await self._send("GET",
             self.config.target_url,
             headers=headers,
             orig_headers=header_order,

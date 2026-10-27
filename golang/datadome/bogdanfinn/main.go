@@ -7,6 +7,8 @@
 //   - Solving interstitial challenges
 //   - Solving slider captcha challenges
 //   - Solving tags challenges (signal collection)
+//   - Forwarding the client hints each generate call returns (sec-ch-ua and the
+//     Accept-CH hints the site asked for) on the following requests
 //   - Handling the complete flow from initial request to successful bypass
 //
 // For more information, visit: https://docs.hypersolutions.co
@@ -25,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,8 +36,8 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v3"
-	"github.com/Hyper-Solutions/hyper-sdk-go/v3/datadome"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v4"
+	"github.com/Hyper-Solutions/hyper-sdk-go/v4/datadome"
 )
 
 // =============================================================================
@@ -193,6 +196,9 @@ type DataDomeSolver struct {
 	script          string
 	captchaPath     string
 	isInterstitial  bool
+
+	// hints forwards the client hints of the latest generate call (see CLIENT HINTS)
+	hints clientHints
 }
 
 // NewDataDomeSolver creates a new solver instance.
@@ -319,12 +325,16 @@ func (s *DataDomeSolver) makeInitialRequest(ctx context.Context) error {
 			"Sec-Fetch-Mode", "Sec-Fetch-User", "Sec-Fetch-Dest", "Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Remember the client hints the site asks for
+	s.hints.record(resp.Header)
 
 	// Read response body
 	body, err := io.ReadAll(resp.Body)
@@ -404,12 +414,16 @@ func (s *DataDomeSolver) reloadPage(ctx context.Context) error {
 			"Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	// Remember the client hints the site asks for
+	s.hints.record(resp.Header)
 
 	// Read response body to check for additional challenges
 	body, err := io.ReadAll(resp.Body)
@@ -468,7 +482,7 @@ func (s *DataDomeSolver) solveInterstitial(ctx context.Context) error {
 
 	// Step 2c: Generate interstitial payload using Hyper API
 	log.Println("  Generating interstitial payload via Hyper API...")
-	payload, _, err := s.hyperAPI.GenerateDataDomeInterstitial(ctx, &hyper.DataDomeInterstitialInput{
+	res, err := s.hyperAPI.GenerateDataDomeInterstitial(ctx, &hyper.DataDomeInterstitialInput{
 		UserAgent:      UserAgent,
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
@@ -482,7 +496,8 @@ func (s *DataDomeSolver) solveInterstitial(ctx context.Context) error {
 
 	// Step 2d: Submit the interstitial payload
 	log.Println("  Submitting interstitial solution...")
-	return s.submitInterstitial(ctx, payload)
+	s.hints.update(res.ClientHints)
+	return s.submitInterstitial(ctx, res.Payload)
 }
 
 // fetchInterstitialPage retrieves the interstitial challenge HTML.
@@ -514,6 +529,7 @@ func (s *DataDomeSolver) fetchInterstitialPage(ctx context.Context) error {
 			"Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -571,6 +587,7 @@ func (s *DataDomeSolver) fetchChallengeScript(ctx context.Context) error {
 			"Referer", "Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -623,6 +640,7 @@ func (s *DataDomeSolver) submitInterstitial(ctx context.Context, payload string)
 			"Referer", "Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -687,7 +705,7 @@ func (s *DataDomeSolver) solveSliderCaptcha(ctx context.Context) error {
 
 	// Step 3d: Generate slider solution using Hyper API
 	log.Println("  Generating slider solution via Hyper API...")
-	checkURL, _, err := s.hyperAPI.GenerateDataDomeSlider(ctx, &hyper.DataDomeSliderInput{
+	res, err := s.hyperAPI.GenerateDataDomeSlider(ctx, &hyper.DataDomeSliderInput{
 		UserAgent:      UserAgent,
 		DeviceLink:     s.deviceCheckLink,
 		Html:           s.html,
@@ -703,7 +721,8 @@ func (s *DataDomeSolver) solveSliderCaptcha(ctx context.Context) error {
 
 	// Step 3e: Submit the slider solution
 	log.Println("  Submitting slider solution...")
-	return s.submitSliderSolution(ctx, checkURL)
+	s.hints.update(res.ClientHints)
+	return s.submitSliderSolution(ctx, res.Payload)
 }
 
 // fetchCaptchaPage retrieves the slider captcha HTML.
@@ -735,6 +754,7 @@ func (s *DataDomeSolver) fetchCaptchaPage(ctx context.Context) error {
 			"Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -789,6 +809,7 @@ func (s *DataDomeSolver) downloadPuzzleImage(ctx context.Context) ([]byte, error
 			"Accept-Encoding", "Accept-Language", "Priority",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -829,6 +850,7 @@ func (s *DataDomeSolver) downloadPieceImage(ctx context.Context) ([]byte, error)
 			"Accept-Encoding", "Accept-Language", "Priority",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -869,6 +891,7 @@ func (s *DataDomeSolver) submitSliderSolution(ctx context.Context, checkURL stri
 			"Accept-Encoding", "Accept-Language",
 		},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -927,7 +950,7 @@ func (s *DataDomeSolver) solveTags(ctx context.Context) error {
 	// First tags request: "ch" (challenge) type
 	// ==========================================================================
 	log.Println("  Sending first tags request (type: ch)...")
-	chPayload, err := s.hyperAPI.GenerateDataDomeTags(ctx, &hyper.DataDomeTagsInput{
+	chRes, err := s.hyperAPI.GenerateDataDomeTags(ctx, &hyper.DataDomeTagsInput{
 		UserAgent:      UserAgent,
 		Cid:            cid,
 		Ddk:            s.config.TagsDDK,
@@ -941,7 +964,8 @@ func (s *DataDomeSolver) solveTags(ctx context.Context) error {
 		return fmt.Errorf("failed to generate ch tags payload: %w", err)
 	}
 
-	if err := s.postTags(ctx, chPayload); err != nil {
+	s.hints.update(chRes.ClientHints)
+	if err := s.postTags(ctx, chRes.Payload); err != nil {
 		return fmt.Errorf("failed to post ch tags: %w", err)
 	}
 
@@ -965,7 +989,7 @@ func (s *DataDomeSolver) solveTags(ctx context.Context) error {
 	}
 
 	log.Println("  Sending second tags request (type: le)...")
-	lePayload, err := s.hyperAPI.GenerateDataDomeTags(ctx, &hyper.DataDomeTagsInput{
+	leRes, err := s.hyperAPI.GenerateDataDomeTags(ctx, &hyper.DataDomeTagsInput{
 		UserAgent:      UserAgent,
 		Cid:            cid,
 		Ddk:            s.config.TagsDDK,
@@ -979,7 +1003,8 @@ func (s *DataDomeSolver) solveTags(ctx context.Context) error {
 		return fmt.Errorf("failed to generate le tags payload: %w", err)
 	}
 
-	if err := s.postTags(ctx, lePayload); err != nil {
+	s.hints.update(leRes.ClientHints)
+	if err := s.postTags(ctx, leRes.Payload); err != nil {
 		return fmt.Errorf("failed to post le tags: %w", err)
 	}
 
@@ -1021,6 +1046,7 @@ func (s *DataDomeSolver) postTags(ctx context.Context, payload string) error {
 		},
 		http.PHeaderOrderKey: {":method", ":authority", ":scheme", ":path"},
 	}
+	s.hints.applyCrossSite(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -1080,6 +1106,7 @@ func (s *DataDomeSolver) verifyAccess(ctx context.Context) (bool, error) {
 			"Accept-Encoding", "Accept-Language", "Cookie", "Priority",
 		},
 	}
+	s.hints.apply(req.Header)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -1098,6 +1125,80 @@ func (s *DataDomeSolver) verifyAccess(ctx context.Context) (bool, error) {
 	}
 
 	return success, nil
+}
+
+// =============================================================================
+// CLIENT HINTS
+// =============================================================================
+
+// clientHints forwards the client hints a Hyper generate call returned the way Chrome does:
+// sec-ch-ua, sec-ch-ua-mobile and sec-ch-ua-platform on every request, any other hint only
+// after the site asked for it in an Accept-CH response header.
+type clientHints struct {
+	values   hyper.ClientHints // from the latest generate call, nil until one returned hints
+	accepted map[string]bool   // lowercase hint names from the site's Accept-CH header
+}
+
+// record remembers the hints a document response from the site asked for in Accept-CH.
+func (c *clientHints) record(header http.Header) {
+	for _, name := range strings.Split(header.Get("Accept-CH"), ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if c.accepted == nil {
+			c.accepted = make(map[string]bool)
+		}
+		c.accepted[name] = true
+	}
+}
+
+// update keeps the hints of a generate result for the following requests.
+func (c *clientHints) update(values hyper.ClientHints) {
+	if len(values) > 0 {
+		c.values = values
+	}
+}
+
+// apply sets the hints on a request to the site. The three default hints replace the hardcoded
+// values; any other requested hint goes right after the last sec-ch-* header in the header order.
+func (c *clientHints) apply(header http.Header) {
+	var extra []string
+	for name, value := range c.values {
+		switch name {
+		case "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform":
+			header[name] = []string{value}
+		default:
+			if c.accepted[name] {
+				header[name] = []string{value}
+				extra = append(extra, name)
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	sort.Strings(extra)
+
+	order := header[http.HeaderOrderKey]
+	at := len(order)
+	for i, name := range order {
+		if strings.HasPrefix(strings.ToLower(name), "sec-ch-") {
+			at = i + 1
+		}
+	}
+	newOrder := append(append(append([]string{}, order[:at]...), extra...), order[at:]...)
+	header[http.HeaderOrderKey] = newOrder
+}
+
+// applyCrossSite sets only the three default hints, for requests to DataDome's hosts (captcha and
+// tags): Chrome sends the other Accept-CH hints to the site's own origin only.
+func (c *clientHints) applyCrossSite(header http.Header) {
+	for _, name := range []string{"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"} {
+		if value, ok := c.values[name]; ok {
+			header[name] = []string{value}
+		}
+	}
 }
 
 // =============================================================================
