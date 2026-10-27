@@ -5,6 +5,7 @@
  *   - Setting up a TLS client session with Chrome browser impersonation
  *   - Forwarding the client hints the Hyper API returns, as Chrome does (Accept-CH aware)
  *   - Detecting Kasada protection (429 on page vs /fp endpoint)
+ *   - Reading the x-kpsdk-v version from the site's p.js
  *   - Fetching and solving ips.js challenges
  *   - Generating payload data (CT) and POW tokens (CD)
  *   - Handling BotID verification when required
@@ -19,9 +20,11 @@ import {
     Session as HyperSession,
     KasadaPayloadInput,
     KasadaPowInput,
+    KasadaVersionInput,
     BotIDHeaderInput,
     generateKasadaPayload,
     generateKasadaPow,
+    getKasadaVersion,
     generateBotIDHeader,
     parseKasadaPath,
 } from 'hyper-sdk-js';
@@ -166,9 +169,6 @@ class ClientHints {
     }
 }
 
-// Kasada SDK version
-const KASADA_VERSION = 'j-1.1.29140';
-
 // Fixed Kasada paths
 const KASADA_BASE_PATH = '/149e9513-01fa-4fb0-aad4-566afd725d1b/2d206a39-8ed7-437e-a3be-862e0f06eea3';
 
@@ -226,6 +226,7 @@ class KasadaSolver {
 
         // Internal state
         this.ip = '';
+        this.version = ''; // x-kpsdk-v, read from p.js
         this.ipsScript = '';
         this.ipsLink = '';
 
@@ -251,6 +252,9 @@ class KasadaSolver {
 
         // Step 1: Fetch the page and check for 429
         const { statusCode, body: pageBody } = await this._fetchPage();
+
+        // Read the x-kpsdk-v value from the site's p.js, used on /fp and the protected requests
+        await this._fetchVersion();
 
         if (statusCode === 429) {
             // Flow 1: 429 on page URL - solve and reload
@@ -349,6 +353,62 @@ class KasadaSolver {
     }
 
     /**
+     * Retrieves p.js and reads its x-kpsdk-v value with the Hyper API.
+     * @returns {Promise<void>}
+     */
+    async _fetchVersion() {
+        const pjsUrl = `${this.baseUrl}${KASADA_BASE_PATH}/p.js`;
+
+        const headers = {
+            'sec-ch-ua-platform': SEC_CH_UA_PLATFORM,
+            'user-agent': USER_AGENT,
+            'sec-ch-ua': SEC_CH_UA,
+            'sec-ch-ua-mobile': '?0',
+            accept: '*/*',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-mode': 'no-cors',
+            'sec-fetch-dest': 'script',
+            referer: this.config.pageUrl,
+            'accept-encoding': 'gzip, deflate, br, zstd',
+            'accept-language': this.config.acceptLanguage,
+            priority: 'u=1',
+        };
+
+        const headerOrder = [
+            'sec-ch-ua-platform',
+            'user-agent',
+            'sec-ch-ua',
+            'sec-ch-ua-mobile',
+            'accept',
+            'sec-fetch-site',
+            'sec-fetch-mode',
+            'sec-fetch-dest',
+            'referer',
+            'accept-encoding',
+            'accept-language',
+            'cookie',
+            'priority',
+        ];
+
+        this.clientHints.apply(pjsUrl, headers, headerOrder);
+        const response = await this.session.get(pjsUrl, {
+            headers,
+            headerOrder,
+        });
+
+        if (response.status !== 200) {
+            throw new Error(`p.js request returned ${response.status}`);
+        }
+
+        const { version } = await getKasadaVersion(
+            this.hyperApi,
+            new KasadaVersionInput(this.config.pageUrl, response.body)
+        );
+        this.version = version;
+        console.log(`  Kasada version (x-kpsdk-v): ${this.version}`);
+    }
+
+    /**
      * Handles the flow when page returns 429.
      * @param {string} blockPageBody
      * @returns {Promise<void>}
@@ -372,7 +432,7 @@ class KasadaSolver {
      */
     async _solveFromFpEndpoint() {
         // Request /fp endpoint to trigger 429
-        const fpUrl = `${this.baseUrl}${KASADA_BASE_PATH}/fp?x-kpsdk-v=${KASADA_VERSION}`;
+        const fpUrl = `${this.baseUrl}${KASADA_BASE_PATH}/fp?x-kpsdk-v=${this.version}`;
 
         const headers = {
             'sec-ch-ua': SEC_CH_UA,
@@ -691,7 +751,7 @@ class KasadaSolver {
             'x-kpsdk-h': '01',
             'sec-ch-ua': SEC_CH_UA,
             'sec-ch-ua-mobile': '?0',
-            'x-kpsdk-v': KASADA_VERSION,
+            'x-kpsdk-v': this.version,
             'user-agent': USER_AGENT,
             accept: '*/*',
             'sec-fetch-site': 'same-origin',
@@ -747,7 +807,7 @@ class KasadaSolver {
         console.log(`    x-kpsdk-ct: ${this.tlCt}`);
         console.log(`    x-kpsdk-cd: ${cd.payload}`);
         console.log(`    x-kpsdk-h:  ${this.mfcH}`);
-        console.log(`    x-kpsdk-v:  ${KASADA_VERSION}`);
+        console.log(`    x-kpsdk-v:  ${this.version}`);
     }
 
     /**

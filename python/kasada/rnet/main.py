@@ -4,6 +4,7 @@ Kasada Bypass Example using rnet TLS client and Hyper Solutions SDK (Async)
 This example demonstrates:
   - Setting up an async TLS client session with Chrome browser impersonation
   - Detecting Kasada protection (429 on page vs /fp endpoint)
+  - Reading the x-kpsdk-v version from the site's p.js
   - Fetching and solving ips.js challenges
   - Generating payload data (CT) and POW tokens (CD)
   - Handling BotID verification when required
@@ -24,7 +25,7 @@ from rnet import Client, Proxy, HeaderMap, OrigHeaderMap, Jar, Cookie
 from rnet.emulation import Emulation
 
 from hyper_sdk import SessionAsync as HyperSession
-from hyper_sdk import KasadaPayloadInput, KasadaPowInput, BotIDHeaderInput
+from hyper_sdk import KasadaPayloadInput, KasadaPowInput, KasadaVersionInput, BotIDHeaderInput
 from hyper_sdk.kasada import parse_kasada_script_path
 
 
@@ -77,9 +78,6 @@ SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"'
 
 # sec-ch-ua-platform header value
 SEC_CH_UA_PLATFORM = '"Windows"'
-
-# Kasada SDK version
-KASADA_VERSION = "j-1.1.29140"
 
 # Fixed Kasada paths
 KASADA_BASE_PATH = "/149e9513-01fa-4fb0-aad4-566afd725d1b/2d206a39-8ed7-437e-a3be-862e0f06eea3"
@@ -192,6 +190,7 @@ class KasadaSolver:
 
         # Internal state
         self.ip: str = ""
+        self.version: str = ""  # x-kpsdk-v, read from p.js
         self.ips_script: str = ""
         self.ips_link: str = ""
 
@@ -216,6 +215,9 @@ class KasadaSolver:
 
         # Step 1: Fetch the page and check for 429
         status_code, page_body = await self._fetch_page()
+
+        # Read the x-kpsdk-v value from the site's p.js, used on /fp and the protected requests
+        await self._fetch_version()
 
         if status_code == 429:
             # Flow 1: 429 on page URL - solve and reload
@@ -354,6 +356,47 @@ class KasadaSolver:
 
         return status_code, body
 
+    async def _fetch_version(self) -> None:
+        """Retrieves p.js and reads its x-kpsdk-v value with the Hyper API."""
+        pjs_url = f"{self.base_url}{KASADA_BASE_PATH}/p.js"
+
+        headers = {
+            "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
+            "User-Agent": USER_AGENT,
+            "sec-ch-ua": SEC_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "Accept": "*/*",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Dest": "script",
+            "Referer": self.config.page_url,
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": self.config.accept_language,
+            "Priority": "u=1",
+        }
+
+        header_order = [
+            "sec-ch-ua-platform", "User-Agent", "sec-ch-ua", "sec-ch-ua-mobile",
+            "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest",
+            "Referer", "Accept-Encoding", "Accept-Language", "Cookie", "Priority",
+        ]
+
+        resp = await self._send("GET",
+            pjs_url,
+            headers=headers,
+            orig_headers=header_order,
+            default_headers=False,
+        )
+
+        if resp.status.as_int() != 200:
+            raise Exception(f"p.js request returned {resp.status.as_int()}")
+
+        result = await self.hyper_api.get_kasada_version(
+            KasadaVersionInput(page_url=self.config.page_url, script=await resp.text())
+        )
+        self.version = result.version
+        print(f"  Kasada version (x-kpsdk-v): {self.version}")
+
     async def _solve_from_block_page(self, block_page_body: str) -> None:
         """Handles the flow when page returns 429."""
         # Extract ips.js URL from block page
@@ -370,7 +413,7 @@ class KasadaSolver:
     async def _solve_from_fp_endpoint(self) -> None:
         """Handles the flow when page doesn't return 429."""
         # Request /fp endpoint to trigger 429
-        fp_url = f"{self.base_url}{KASADA_BASE_PATH}/fp?x-kpsdk-v={KASADA_VERSION}"
+        fp_url = f"{self.base_url}{KASADA_BASE_PATH}/fp?x-kpsdk-v={self.version}"
 
         headers = {
             "sec-ch-ua": SEC_CH_UA,
@@ -621,7 +664,7 @@ class KasadaSolver:
             "x-kpsdk-h": "01",
             "sec-ch-ua": SEC_CH_UA,
             "sec-ch-ua-mobile": "?0",
-            "x-kpsdk-v": KASADA_VERSION,
+            "x-kpsdk-v": self.version,
             "User-Agent": USER_AGENT,
             "Accept": "*/*",
             "Sec-Fetch-Site": "same-origin",
@@ -681,7 +724,7 @@ class KasadaSolver:
         print(f"    x-kpsdk-ct: {self.tl_ct}")
         print(f"    x-kpsdk-cd: {cd}")
         print(f"    x-kpsdk-h:  {self.mfc_h}")
-        print(f"    x-kpsdk-v:  {KASADA_VERSION}")
+        print(f"    x-kpsdk-v:  {self.version}")
 
     async def close(self) -> None:
         """Releases resources associated with the solver."""
