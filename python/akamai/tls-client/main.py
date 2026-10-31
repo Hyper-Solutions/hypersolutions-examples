@@ -319,7 +319,7 @@ class AkamaiSolver:
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "upgrade-insecure-requests": "1",
             "user-agent": USER_AGENT,
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "sec-fetch-site": "none",
             "sec-fetch-mode": "navigate",
             "sec-fetch-user": "?1",
