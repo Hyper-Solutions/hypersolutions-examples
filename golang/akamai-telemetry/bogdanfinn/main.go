@@ -71,10 +71,10 @@ const (
 	APILanguage = "en"
 
 	// DefaultUserAgent is Chrome 152 on Windows, matching the TLS client profile.
-	DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+	DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 
 	// SecChUa and SecChUaPlatform are sent until the first generate call returns client hints.
-	SecChUa         = `"Not=A?Brand";v="99", "Google Chrome";v="152", "Chromium";v="152"`
+	SecChUa         = `"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"`
 	SecChUaPlatform = `"Windows"`
 )
 

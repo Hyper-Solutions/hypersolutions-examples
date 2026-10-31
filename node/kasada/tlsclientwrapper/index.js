@@ -66,10 +66,10 @@ function defaultConfig() {
 
 // User agent string for Chrome on Windows
 const USER_AGENT =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36';
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
 
 // sec-ch-ua header value for Chrome 143
-const SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"';
+const SEC_CH_UA = '"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"';
 
 // sec-ch-ua-platform header value
 const SEC_CH_UA_PLATFORM = '"Windows"';
