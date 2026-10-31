@@ -91,10 +91,10 @@ func DefaultConfig() *Config {
 // They must match the TLS client profile (Chrome 133) to avoid detection.
 const (
 	// UserAgent is the browser user agent string for Chrome 143 on Windows.
-	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 
 	// SecChUa is the sec-ch-ua header value for Chrome 143.
-	SecChUa = `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
+	SecChUa = `"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"`
 
 	// SecChUaPlatform is the sec-ch-ua-platform header value.
 	SecChUaPlatform = `"Windows"`
@@ -286,7 +286,7 @@ func (s *KasadaSolver) fetchPage(ctx context.Context) (int, []byte, error) {
 		"sec-ch-ua-platform":        {SecChUaPlatform},
 		"upgrade-insecure-requests": {"1"},
 		"user-agent":                {UserAgent},
-		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
+		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 		"sec-fetch-site":            {"none"},
 		"sec-fetch-mode":            {"navigate"},
 		"sec-fetch-user":            {"?1"},
@@ -415,7 +415,7 @@ func (s *KasadaSolver) solveFromFpEndpoint(ctx context.Context) error {
 		"sec-ch-ua-platform":        {SecChUaPlatform},
 		"upgrade-insecure-requests": {"1"},
 		"user-agent":                {UserAgent},
-		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
+		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 		"sec-fetch-site":            {"same-origin"},
 		"sec-fetch-mode":            {"navigate"},
 		"sec-fetch-dest":            {"iframe"},

@@ -91,10 +91,10 @@ func DefaultConfig() *Config {
 // They must match the TLS client profile (Chrome) to avoid detection.
 const (
 	// UserAgent is the browser user agent string for Chrome 152 on Windows.
-	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 
 	// SecChUa is the sec-ch-ua header value for Chrome 152.
-	SecChUa = `"Not=A?Brand";v="99", "Google Chrome";v="152", "Chromium";v="152"`
+	SecChUa = `"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"`
 
 	// SecChUaPlatform is the sec-ch-ua-platform header value.
 	SecChUaPlatform = `"Windows"`
@@ -305,7 +305,7 @@ func (s *AkamaiSolver) fetchPage(ctx context.Context) error {
 		"sec-ch-ua-platform":        {SecChUaPlatform},
 		"upgrade-insecure-requests": {"1"},
 		"user-agent":                {UserAgent},
-		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
+		"accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
 		"sec-fetch-site":            {"none"},
 		"sec-fetch-mode":            {"navigate"},
 		"sec-fetch-user":            {"?1"},

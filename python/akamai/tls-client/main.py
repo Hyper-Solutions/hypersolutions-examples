@@ -74,10 +74,10 @@ def default_config() -> Config:
 # =============================================================================
 
 # User agent string for Chrome on Windows
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 
 # sec-ch-ua header value for Chrome 143
-SEC_CH_UA = '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"'
+SEC_CH_UA = '"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"'
 
 # sec-ch-ua-platform header value
 SEC_CH_UA_PLATFORM = '"Windows"'
@@ -319,7 +319,7 @@ class AkamaiSolver:
             "sec-ch-ua-platform": SEC_CH_UA_PLATFORM,
             "upgrade-insecure-requests": "1",
             "user-agent": USER_AGENT,
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "sec-fetch-site": "none",
             "sec-fetch-mode": "navigate",
             "sec-fetch-user": "?1",
